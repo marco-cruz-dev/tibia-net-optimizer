@@ -102,9 +102,11 @@ mod tests {
 
     #[test]
     fn windows_config_dir_uses_appdata() {
+        // Built with join() so the test also holds on Unix, where `\` isn't a separator.
+        let appdata = r"C:\Users\me\AppData\Roaming";
         assert_eq!(
-            config_dir_for(Os::Windows, env(&[("APPDATA", r"C:\Users\me\AppData\Roaming")])),
-            Some(PathBuf::from(r"C:\Users\me\AppData\Roaming\TibiaNetOptimizer"))
+            config_dir_for(Os::Windows, env(&[("APPDATA", appdata)])),
+            Some(PathBuf::from(appdata).join("TibiaNetOptimizer"))
         );
         assert_eq!(config_dir_for(Os::Windows, env(&[])), None);
     }
