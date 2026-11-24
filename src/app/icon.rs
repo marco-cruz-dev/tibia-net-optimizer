@@ -6,25 +6,18 @@
 //! (green / red / amber / grey) in the bottom-right corner.
 
 use super::view::Tone;
+pub use crate::app::icon_raster::{
+    ico_file, render, BADGE_CENTRE, BADGE_RADIUS, OUTLINE, PULSE, SHIELD_BOTTOM, SHIELD_TOP,
+};
 
 pub const GREEN: [u8; 3] = [0x22, 0xC5, 0x5E];
 pub const RED: [u8; 3] = [0xEF, 0x44, 0x44];
 pub const AMBER: [u8; 3] = [0xF5, 0x9E, 0x0B];
 pub const GREY: [u8; 3] = [0x9C, 0xA3, 0xAF];
 
-/// Shield palette.
-pub const OUTLINE: [u8; 3] = [0x0B, 0x1A, 0x33];
-pub const SHIELD_TOP: [u8; 3] = [0x25, 0x63, 0xEB];
-pub const SHIELD_BOTTOM: [u8; 3] = [0x0F, 0x76, 0x6E];
-pub const PULSE: [u8; 3] = [0xFF, 0xFF, 0xFF];
-
 pub const TRAY_SIZE: u32 = 32;
 /// Window/taskbar icon; large enough for Alt-Tab and high-DPI taskbars.
 pub const WINDOW_ICON_SIZE: u32 = 128;
-
-/// Status-dot geometry (unit coordinates), shared with tests.
-pub const BADGE_CENTRE: (f32, f32) = (0.76, 0.76);
-pub const BADGE_RADIUS: f32 = 0.24;
 
 pub fn tone_rgb(tone: Tone) -> [u8; 3] {
     match tone {
@@ -43,156 +36,6 @@ pub fn app_icon_rgba(size: u32) -> Vec<u8> {
 /// `size`×`size` RGBA: the app icon with a status dot for the tray.
 pub fn tray_icon_rgba(size: u32, tone: Tone) -> Vec<u8> {
     render(size, Some(tone_rgb(tone)))
-}
-
-// --- rasterizer (unit coordinates: 0..1 across the icon) -------------------
-
-type Pt = (f32, f32);
-
-const OUTLINE_WIDTH: f32 = 0.05;
-const PULSE_HALF_WIDTH: f32 = 0.045;
-const BADGE_RING: f32 = 0.06;
-const SHIELD_TOP_Y: f32 = 0.10;
-const SHIELD_TIP_Y: f32 = 0.94;
-
-/// Ping pulse: flat, spike up, dip down, settle.
-const PULSE_POINTS: [Pt; 7] = [
-    (0.24, 0.50),
-    (0.38, 0.50),
-    (0.45, 0.32),
-    (0.54, 0.68),
-    (0.61, 0.44),
-    (0.66, 0.50),
-    (0.76, 0.50),
-];
-
-fn quad(a: Pt, c: Pt, b: Pt, t: f32) -> Pt {
-    let u = 1.0 - t;
-    (
-        u * u * a.0 + 2.0 * u * t * c.0 + t * t * b.0,
-        u * u * a.1 + 2.0 * u * t * c.1 + t * t * b.1,
-    )
-}
-
-/// Heater shield: flat top, straight sides, curved sides meeting at a point.
-fn shield_polygon() -> Vec<Pt> {
-    let mut pts = vec![(0.16, SHIELD_TOP_Y), (0.84, SHIELD_TOP_Y), (0.84, 0.50)];
-    for i in 1..=16 {
-        pts.push(quad(
-            (0.84, 0.50),
-            (0.82, 0.80),
-            (0.5, SHIELD_TIP_Y),
-            i as f32 / 16.0,
-        ));
-    }
-    for i in 1..=16 {
-        pts.push(quad(
-            (0.5, SHIELD_TIP_Y),
-            (0.18, 0.80),
-            (0.16, 0.50),
-            i as f32 / 16.0,
-        ));
-    }
-    pts
-}
-
-fn segment_distance(p: Pt, a: Pt, b: Pt) -> f32 {
-    let (abx, aby) = (b.0 - a.0, b.1 - a.1);
-    let len2 = abx * abx + aby * aby;
-    let t = if len2 == 0.0 {
-        0.0
-    } else {
-        (((p.0 - a.0) * abx + (p.1 - a.1) * aby) / len2).clamp(0.0, 1.0)
-    };
-    let (dx, dy) = (p.0 - (a.0 + t * abx), p.1 - (a.1 + t * aby));
-    (dx * dx + dy * dy).sqrt()
-}
-
-/// Negative inside, positive outside.
-fn polygon_signed_distance(p: Pt, poly: &[Pt]) -> f32 {
-    let mut d = f32::INFINITY;
-    let mut inside = false;
-    for i in 0..poly.len() {
-        let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
-        d = d.min(segment_distance(p, a, b));
-        if (a.1 > p.1) != (b.1 > p.1) && p.0 < a.0 + (p.1 - a.1) * (b.0 - a.0) / (b.1 - a.1) {
-            inside = !inside;
-        }
-    }
-    if inside {
-        -d
-    } else {
-        d
-    }
-}
-
-fn polyline_distance(p: Pt, line: &[Pt]) -> f32 {
-    line.windows(2)
-        .map(|w| segment_distance(p, w[0], w[1]))
-        .fold(f32::INFINITY, f32::min)
-}
-
-fn lerp_rgb(a: [u8; 3], b: [u8; 3], t: f32) -> [f32; 3] {
-    let t = t.clamp(0.0, 1.0);
-    [0, 1, 2].map(|i| a[i] as f32 + (b[i] as f32 - a[i] as f32) * t)
-}
-
-/// "Over" compositing of `rgb` with `coverage` onto a straight-alpha pixel.
-fn over(dst: &mut [f32; 4], rgb: [f32; 3], coverage: f32) {
-    if coverage <= 0.0 {
-        return;
-    }
-    let da = dst[3];
-    let out_a = coverage + da * (1.0 - coverage);
-    for i in 0..3 {
-        dst[i] = (rgb[i] * coverage + dst[i] * da * (1.0 - coverage)) / out_a;
-    }
-    dst[3] = out_a;
-}
-
-fn render(size: u32, badge: Option<[u8; 3]>) -> Vec<u8> {
-    let px = 1.0 / size as f32; // one pixel in unit coordinates
-                                // Coverage from a signed distance: a 1 px anti-aliased edge.
-    let cov = |sd: f32| (0.5 - sd / px).clamp(0.0, 1.0);
-    let shield = shield_polygon();
-    let pulse_half = PULSE_HALF_WIDTH.max(0.6 * px);
-    let rgb = |c: [u8; 3]| c.map(f32::from);
-
-    let mut out = Vec::with_capacity((size * size * 4) as usize);
-    for y in 0..size {
-        for x in 0..size {
-            let p = ((x as f32 + 0.5) * px, (y as f32 + 0.5) * px);
-            let mut c = [0.0f32; 4];
-
-            let sd = polygon_signed_distance(p, &shield);
-            over(&mut c, rgb(OUTLINE), cov(sd));
-            let t = (p.1 - SHIELD_TOP_Y) / (SHIELD_TIP_Y - SHIELD_TOP_Y);
-            over(
-                &mut c,
-                lerp_rgb(SHIELD_TOP, SHIELD_BOTTOM, t),
-                cov(sd + OUTLINE_WIDTH),
-            );
-            over(
-                &mut c,
-                rgb(PULSE),
-                cov(polyline_distance(p, &PULSE_POINTS) - pulse_half),
-            );
-
-            if let Some(dot) = badge {
-                let d = ((p.0 - BADGE_CENTRE.0).powi(2) + (p.1 - BADGE_CENTRE.1).powi(2)).sqrt();
-                over(&mut c, rgb(OUTLINE), cov(d - BADGE_RADIUS));
-                over(&mut c, rgb(dot), cov(d - (BADGE_RADIUS - BADGE_RING)));
-            }
-
-            let a = (c[3] * 255.0).round() as u8;
-            if a == 0 {
-                out.extend_from_slice(&[0, 0, 0, 0]);
-            } else {
-                out.extend_from_slice(&[c[0].round() as u8, c[1].round() as u8, c[2].round() as u8, a]);
-            }
-        }
-    }
-    out
 }
 
 #[cfg(test)]

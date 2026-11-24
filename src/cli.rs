@@ -2,9 +2,9 @@
 //!
 //! ```text
 //! tibia-net-optimizer [--minimized]                      # dashboard + tray (default)
-//! tibia-net-optimizer status [--json]
-//! tibia-net-optimizer apply|revert [--only <tweak-id>]
-//! tibia-net-optimizer startup [on|off|status]
+//! tno status [--json]
+//! tno apply|revert [--only <tweak-id>]
+//! tno startup [on|off|status]
 //!                     [--elevate] [--pause] [-h|--help]
 //! ```
 
@@ -58,10 +58,11 @@ pub struct Cli {
 }
 
 pub const USAGE: &str = "\
-Usage: tibia-net-optimizer [COMMAND] [OPTIONS]
+Usage: tno [COMMAND] [OPTIONS]
+       tibia-net-optimizer [--minimized]    Open the dashboard and tray icon
 
 Commands:
-  (none)                   Open the dashboard and tray icon (--minimized: tray only)
+  (none)                   tno: show the status; tibia-net-optimizer: open the dashboard
   status [--json]          Show current optimization state (read-only)
   apply [--only ID]        Apply all optimizations for this OS, or just one (admin/root)
   revert [--only ID]       Restore the OS defaults, or just one setting (admin/root)

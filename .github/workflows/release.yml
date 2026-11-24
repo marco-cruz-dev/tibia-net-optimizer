@@ -1,0 +1,103 @@
+name: Release
+
+# Push a tag like `v0.1.0` to build all platforms and publish a GitHub
+# Release. "Run workflow" (workflow_dispatch) is a dry run: it builds and
+# uploads the packages as workflow artifacts but publishes nothing.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            name: windows-x86_64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: linux-x86_64
+          - os: macos-latest
+            target: universal-apple-darwin
+            name: macos-universal
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target == 'universal-apple-darwin' && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.target }}
+
+      - name: Test
+        run: cargo test --locked
+
+      - name: Build
+        if: matrix.target != 'universal-apple-darwin'
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Build (macOS universal binary)
+        if: matrix.target == 'universal-apple-darwin'
+        run: |
+          cargo build --release --locked --target aarch64-apple-darwin
+          cargo build --release --locked --target x86_64-apple-darwin
+          mkdir -p target/universal-apple-darwin/release
+          for bin in tibia-net-optimizer tno; do
+            lipo -create -output "target/universal-apple-darwin/release/$bin" \
+              "target/aarch64-apple-darwin/release/$bin" \
+              "target/x86_64-apple-darwin/release/$bin"
+          done
+
+      - name: Package
+        shell: bash
+        run: |
+          ext=""; [[ "${{ runner.os }}" == "Windows" ]] && ext=".exe"
+          dir="tibia-net-optimizer-${GITHUB_REF_NAME}-${{ matrix.name }}"
+          mkdir "$dir"
+          cp "target/${{ matrix.target }}/release/tibia-net-optimizer$ext" \
+             "target/${{ matrix.target }}/release/tno$ext" \
+             README.md LICENSE CHANGELOG.md "$dir/"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            7z a -tzip "$dir.zip" "$dir" > /dev/null
+            echo "ASSET=$dir.zip" >> "$GITHUB_ENV"
+          else
+            tar czf "$dir.tar.gz" "$dir"
+            echo "ASSET=$dir.tar.gz" >> "$GITHUB_ENV"
+          fi
+          ls -l "$dir"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: ${{ env.ASSET }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums
+        run: cd dist && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          awk -v v="$version" '$0 ~ "^## \\[" v "\\]" {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md > notes.md
+          test -s notes.md || { echo "No CHANGELOG.md section for $version"; exit 1; }
+          cat notes.md
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/* --title "Tibia Network Optimizer $GITHUB_REF_NAME" --notes-file notes.md

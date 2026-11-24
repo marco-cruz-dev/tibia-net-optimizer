@@ -37,7 +37,7 @@ pub fn systemd_quote(s: &str) -> String {
 /// One-shot unit that runs `<exe> apply` once the network is up.
 pub fn systemd_unit(exe: &Path) -> String {
     format!(
-        "# Managed by tibia-net-optimizer. Remove with `tibia-net-optimizer startup off`.\n\
+        "# Managed by tibia-net-optimizer. Remove with `tno startup off`.\n\
          [Unit]\n\
          Description=Tibia Network Optimizer - re-apply TCP tweaks at boot\n\
          Wants=network-online.target\n\
@@ -135,7 +135,7 @@ impl StartupManager for LaunchdStartup {
         let plist = launchd_plist(
             LAUNCHD_STARTUP_LABEL,
             &[exe.to_string_lossy().into_owned(), "apply".into()],
-            &["Managed by tibia-net-optimizer. Remove with `tibia-net-optimizer startup off`.".into()],
+            &["Managed by tibia-net-optimizer. Remove with `tno startup off`.".into()],
         );
         fs::write(&self.plist_path, plist)?;
         Ok(())

@@ -6,6 +6,10 @@ rust-version = "1.95"
 license = "GPL-3.0-only"
 description = "Windows tray utility that tunes TCP settings (auto-tuning, Nagle) for low-latency Tibia play"
 readme = "README.md"
+repository = "https://github.com/marco-cruz-dev/TibiaNetOptimizer"
+# Two binaries: the dashboard (`tibia-net-optimizer`, src/main.rs) and the
+# command line (`tno`, src/bin/tno.rs). `cargo run` starts the dashboard.
+default-run = "tibia-net-optimizer"
 
 # Sprint 1 keeps dependencies minimal: only what the domain core + Windows
 # adapters need. GUI/tray crates (eframe, egui, tray-icon, image) and the
@@ -54,6 +58,10 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
+
+[build-dependencies]
+# Embeds the icon, manifest and version info (Windows targets only; see build.rs).
+winresource = "0.1"
 
 [profile.release]
 opt-level = "z"

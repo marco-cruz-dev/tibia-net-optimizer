@@ -52,8 +52,7 @@ pub fn render(settings: &PersistedSettings, format: &PersistFormat) -> String {
         .collect();
     match format {
         PersistFormat::SysctlConf => {
-            let mut out =
-                String::from("# Managed by tibia-net-optimizer. Remove with `tibia-net-optimizer revert`.\n");
+            let mut out = String::from("# Managed by tibia-net-optimizer. Remove with `tno revert`.\n");
             for line in &metadata {
                 out.push_str(&format!("# {line}\n"));
             }
@@ -66,8 +65,7 @@ pub fn render(settings: &PersistedSettings, format: &PersistFormat) -> String {
         PersistFormat::LaunchdPlist { label } => {
             let mut args = vec![SYSCTL.to_string(), "-w".to_string()];
             args.extend(settings.entries.iter().map(|(k, e)| format!("{k}={}", e.value)));
-            let mut comments =
-                vec!["Managed by tibia-net-optimizer. Remove with `tibia-net-optimizer revert`.".into()];
+            let mut comments = vec!["Managed by tibia-net-optimizer. Remove with `tno revert`.".into()];
             comments.extend(metadata);
             launchd_plist(label, &args, &comments)
         }

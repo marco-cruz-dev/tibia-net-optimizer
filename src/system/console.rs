@@ -1,22 +1,16 @@
-//! Windows console handling for a binary that is both a CLI and a GUI.
+//! Windows console handling for the GUI-subsystem dashboard binary.
 
-/// When the app was double-clicked (Windows created a console just for us),
-/// release it so only the GUI window remains. When started from a terminal,
-/// the console is shared with the shell and is kept.
+/// The dashboard exe has no console of its own. When it's run with CLI
+/// arguments from a terminal, attach to that terminal so output is visible.
+/// (When output is redirected, the inherited handles already work.)
 #[cfg(windows)]
-pub fn detach_if_owned() {
-    use windows_sys::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
-
-    let mut pids = [0u32; 2];
-    // SAFETY: the buffer holds `pids.len()` entries as declared.
-    let attached = unsafe { GetConsoleProcessList(pids.as_mut_ptr(), pids.len() as u32) };
-    if attached == 1 {
-        // SAFETY: no preconditions; we only print nothing afterwards in GUI mode.
-        unsafe {
-            FreeConsole();
-        }
+pub fn attach_parent_console() {
+    use windows_sys::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+    // SAFETY: no preconditions; failure (no parent console) is harmless.
+    unsafe {
+        AttachConsole(ATTACH_PARENT_PROCESS);
     }
 }
 
 #[cfg(not(windows))]
-pub fn detach_if_owned() {}
+pub fn attach_parent_console() {}

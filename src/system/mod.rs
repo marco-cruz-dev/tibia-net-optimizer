@@ -5,5 +5,6 @@ pub mod command;
 pub mod console;
 pub mod elevation;
 pub mod encoding;
+pub mod manifest;
 pub mod notify;
 pub mod startup;

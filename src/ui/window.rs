@@ -153,10 +153,16 @@ impl Dashboard {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
             }
             Effect::HideWindow => ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false)),
-            Effect::RestartElevated => match elevation::relaunch_elevated(&[]) {
-                Ok(()) => self.quit(ctx),
-                Err(e) => self.dispatch(ctx, Msg::RestartFailed(e.to_string())),
-            },
+            Effect::RestartElevated => {
+                // Relaunch this (dashboard) exe elevated, with no arguments.
+                let result = std::env::current_exe()
+                    .map_err(crate::Error::from)
+                    .and_then(|exe| elevation::relaunch_elevated(&exe, &[]));
+                match result {
+                    Ok(()) => self.quit(ctx),
+                    Err(e) => self.dispatch(ctx, Msg::RestartFailed(e.to_string())),
+                }
+            }
             Effect::Notify { title, body } => {
                 // Off the UI thread: toasts and notify-send can be slow.
                 std::thread::spawn(move || {

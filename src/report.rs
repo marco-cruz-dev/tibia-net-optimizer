@@ -95,7 +95,7 @@ impl StatusReport {
         let apply_cmd = if self.elevated { "apply" } else { "apply --elevate" };
         let overall = match self.overall.as_str() {
             "optimized" => "OPTIMIZED for Tibia".to_string(),
-            "needs_fix" => format!("NEEDS FIX - run `tibia-net-optimizer {apply_cmd}`"),
+            "needs_fix" => format!("NEEDS FIX - run `tno {apply_cmd}`"),
             _ => "UNKNOWN".to_string(),
         };
         lines.push(String::new());
@@ -245,12 +245,9 @@ mod tests {
     #[test]
     fn needs_fix_hint_depends_on_elevation() {
         let user = report(Os::Windows, vec![nagle(false)], Ok(false), false, false).to_text();
-        assert!(
-            user.contains("run `tibia-net-optimizer apply --elevate`"),
-            "{user}"
-        );
+        assert!(user.contains("run `tno apply --elevate`"), "{user}");
         let admin = report(Os::Windows, vec![nagle(false)], Ok(false), true, false).to_text();
-        assert!(admin.contains("run `tibia-net-optimizer apply`"), "{admin}");
+        assert!(admin.contains("run `tno apply`"), "{admin}");
     }
 
     #[test]

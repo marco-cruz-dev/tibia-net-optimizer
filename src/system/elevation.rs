@@ -81,10 +81,10 @@ pub fn is_elevated() -> bool {
     false
 }
 
-/// Relaunches the current executable elevated (UAC prompt) with `args`.
+/// Launches `exe` elevated (UAC prompt) with `args`.
 /// Returns once the elevated process has been started.
 #[cfg(windows)]
-pub fn relaunch_elevated(args: &[String]) -> crate::Result<()> {
+pub fn relaunch_elevated(exe: &std::path::Path, args: &[String]) -> crate::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::UI::Shell::ShellExecuteW;
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
@@ -93,7 +93,6 @@ pub fn relaunch_elevated(args: &[String]) -> crate::Result<()> {
         s.encode_wide().chain(std::iter::once(0)).collect()
     }
 
-    let exe = std::env::current_exe()?;
     let verb = wide("runas".as_ref());
     let file = wide(exe.as_os_str());
     let params = wide(build_parameters(args).as_ref());
@@ -119,19 +118,20 @@ pub fn relaunch_elevated(args: &[String]) -> crate::Result<()> {
     }
 }
 
-/// Re-runs the current executable as root (`sudo` in a terminal, otherwise
-/// `pkexec` / an AppleScript admin prompt) and waits for it to finish.
+/// Runs `exe` as root (`sudo` in a terminal, otherwise `pkexec` / an
+/// AppleScript admin prompt) and waits for it to finish.
 #[cfg(unix)]
-pub fn relaunch_elevated(args: &[String]) -> crate::Result<()> {
+pub fn relaunch_elevated(exe: &std::path::Path, args: &[String]) -> crate::Result<()> {
     use std::io::IsTerminal;
-    run_elevated(args, std::io::stdin().is_terminal())
+    run_elevated(exe, args, std::io::stdin().is_terminal())
 }
 
 /// Runs `<this exe> args...` as root via a graphical prompt (pkexec / macOS
 /// admin dialog) and waits. Used by the GUI on Linux/macOS without root.
 #[cfg(unix)]
 pub fn run_elevated_helper(args: &[String]) -> Result<(), String> {
-    run_elevated(args, false).map_err(|e| e.to_string())
+    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    run_elevated(&exe, args, false).map_err(|e| e.to_string())
 }
 
 #[cfg(not(unix))]
@@ -140,8 +140,7 @@ pub fn run_elevated_helper(_args: &[String]) -> Result<(), String> {
 }
 
 #[cfg(unix)]
-fn run_elevated(args: &[String], interactive: bool) -> crate::Result<()> {
-    let exe = std::env::current_exe()?;
+fn run_elevated(exe: &std::path::Path, args: &[String], interactive: bool) -> crate::Result<()> {
     let (program, argv) = crate::unix::elevate::elevation_command(
         crate::platform::Os::current(),
         &exe.to_string_lossy(),
@@ -160,7 +159,7 @@ fn run_elevated(args: &[String], interactive: bool) -> crate::Result<()> {
 }
 
 #[cfg(not(any(windows, unix)))]
-pub fn relaunch_elevated(_args: &[String]) -> crate::Result<()> {
+pub fn relaunch_elevated(_exe: &std::path::Path, _args: &[String]) -> crate::Result<()> {
     Err(crate::Error::Io(std::io::Error::other(
         "elevated relaunch is not supported on this platform",
     )))
