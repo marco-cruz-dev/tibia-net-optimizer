@@ -15,7 +15,7 @@ use crate::app::view::{Tone, TrayView, View};
 use crate::app::worker::Worker;
 use crate::config::Config;
 use crate::platform::{self, Os};
-use crate::system::elevation;
+use crate::system::{elevation, notify};
 
 const TITLE: &str = "Tibia Network Optimizer";
 
@@ -79,9 +79,12 @@ impl Dashboard {
         let (tx, ui_events) = mpsc::channel();
 
         let wake = ctx.clone();
+        // At least 10 s, so a hand-edited config can't make it spin.
+        let interval = Duration::from_secs(state.config.check_interval_secs.max(10));
         let worker = Worker::spawn(
             platform::current,
             state.elevated,
+            interval,
             Box::new(elevation::run_elevated_helper),
             move || wake.request_repaint(),
         );
@@ -144,6 +147,14 @@ impl Dashboard {
                 Ok(()) => self.quit(ctx),
                 Err(e) => self.dispatch(ctx, Msg::RestartFailed(e.to_string())),
             },
+            Effect::Notify { title, body } => {
+                // Off the UI thread: toasts and notify-send can be slow.
+                std::thread::spawn(move || {
+                    if let Err(e) = notify::send(&title, &body) {
+                        eprintln!("Notification failed: {e}");
+                    }
+                });
+            }
             Effect::Quit => self.quit(ctx),
         }
     }
@@ -249,6 +260,9 @@ impl Dashboard {
             .changed()
         {
             out.push(Msg::SetAutoHeal(auto_heal));
+        }
+        if let Some(hint) = view.auto_heal_hint {
+            ui.label(RichText::new(hint).small().color(colour(Tone::Warn)));
         }
         let mut startup = view.startup_checked.unwrap_or(false);
         let startup_enabled = view.controls_enabled && view.startup_checked.is_some();

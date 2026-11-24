@@ -53,6 +53,8 @@ pub struct View {
     /// `None` while unknown.
     pub startup_checked: Option<bool>,
     pub auto_heal_checked: bool,
+    /// Shown under the auto-heal checkbox when it can't run (no admin/root).
+    pub auto_heal_hint: Option<&'static str>,
     pub minimize_checked: bool,
     pub reboot_notice: Option<&'static str>,
     pub notice: Option<Notice>,
@@ -74,6 +76,17 @@ pub const BANNER_UNKNOWN: &str = "Status unknown — some settings couldn't be r
 pub const READ_ONLY_WINDOWS: &str = "Running in Read-Only Mode — Restart as Administrator to apply changes";
 pub const READ_ONLY_UNIX: &str = "Running without root — changes will ask for your password";
 pub const REBOOT_NOTICE: &str = "Reboot recommended for the auto-tuning change to take full effect.";
+pub const AUTO_HEAL_HINT_WINDOWS: &str =
+    "Auto-heal needs admin rights. Enable 'Run at startup' so the app starts elevated at login.";
+pub const AUTO_HEAL_HINT_UNIX: &str =
+    "Auto-heal needs root. 'Run at startup' re-applies the settings at every boot instead.";
+
+fn auto_heal_hint(s: &AppState) -> Option<&'static str> {
+    (s.config.auto_heal && !s.elevated).then_some(match s.os {
+        crate::platform::Os::Windows => AUTO_HEAL_HINT_WINDOWS,
+        _ => AUTO_HEAL_HINT_UNIX,
+    })
+}
 
 /// Why each setting matters (card tooltips).
 pub fn tooltip(id: TweakId) -> &'static str {
@@ -194,6 +207,7 @@ impl View {
             controls_enabled: !s.busy && route != Route::NeedsRestart,
             startup_checked: s.report.as_ref().and_then(|r| r.startup),
             auto_heal_checked: s.config.auto_heal,
+            auto_heal_hint: auto_heal_hint(s),
             minimize_checked: s.config.minimize_to_tray,
             reboot_notice: s
                 .report
@@ -405,6 +419,20 @@ mod tests {
         assert_eq!(v.reboot_notice, Some(REBOOT_NOTICE));
         let fresh = AppState::new(Os::Windows, true, Config::default(), false).0;
         assert_eq!(View::from_state(&fresh).startup_checked, None);
+    }
+
+    #[test]
+    fn auto_heal_hint_only_when_enabled_without_rights() {
+        let hint = |os, elevated, on| {
+            let mut s = with_report(os, elevated, vec![], false);
+            s.config.auto_heal = on;
+            View::from_state(&s).auto_heal_hint
+        };
+        assert_eq!(hint(Os::Windows, false, true), Some(AUTO_HEAL_HINT_WINDOWS));
+        assert_eq!(hint(Os::Linux, false, true), Some(AUTO_HEAL_HINT_UNIX));
+        assert_eq!(hint(Os::Macos, false, true), Some(AUTO_HEAL_HINT_UNIX));
+        assert_eq!(hint(Os::Windows, true, true), None, "elevated: it works");
+        assert_eq!(hint(Os::Windows, false, false), None, "off: nothing to explain");
     }
 
     #[test]

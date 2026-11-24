@@ -14,7 +14,7 @@ readme = "README.md"
 # The tray + dashboard GUI. Disable for a CLI-only build:
 #   cargo build --no-default-features
 default = ["gui"]
-gui = ["dep:eframe", "dep:tray-icon"]
+gui = ["dep:eframe", "dep:tray-icon", "dep:tauri-winrt-notification"]
 
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
@@ -30,6 +30,8 @@ tray-icon = { version = "0.26", default-features = false, features = ["ksni"], o
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+# Native toast notifications for auto-heal (GUI only).
+tauri-winrt-notification = { version = "0.8", optional = true }
 # Raw Win32 bindings (lighter than the `windows` crate suggested in the spec).
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

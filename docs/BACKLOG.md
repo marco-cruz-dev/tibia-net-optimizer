@@ -56,6 +56,7 @@ manual QA checklist.
 | Windows | `apply --elevate` → accept UAC → `status` shows optimized and "Reboot recommended". `startup on --elevate` → Task Scheduler shows "TibiaNetOptimizer". `revert --elevate` → defaults restored. `startup off --elevate`. |
 | Linux | `sudo tibia-net-optimizer apply` → `/etc/sysctl.d/99-tibia-net-optimizer.conf` exists, `ip route show default` shows `quickack 1`. Reconnect Wi-Fi → quickack is still on (NetworkManager hook). Reboot → still optimized. `sudo ... revert` → original values restored and files removed. `sudo ... startup on/off` → `systemctl is-enabled tibia-net-optimizer`. |
 | macOS | `sudo tibia-net-optimizer apply` → `sysctl net.inet.tcp.delayed_ack` = 0 and the plist exists in `/Library/LaunchDaemons`. Reboot → still 0. `revert` → `delayed_ack` back to 3 and plist removed. `startup on/off`. |
+| Auto-heal (Windows) | `startup on --elevate` and log in again (the app starts elevated in the tray). Tick "Auto-heal". In an admin terminal: `netsh int tcp set global autotuninglevel=normal`. Within 60 s: toast "...re-applied: TCP auto-tuning", the tray turns green, and `status` shows disabled. Click Revert in the dashboard → auto-heal unticks with an explanation, and nothing gets re-applied. |
 | GUI (all) | Launch with no args → dashboard shows real status and a coloured tray icon. Left-click the tray → window shows. Right-click → menu: Status, Open Dashboard, Apply, Revert, separator, Quit. Close the window → hides to the tray (with "Minimize to tray" on) or quits (off). Toggle a card / Optimize Now / Revert: Windows admin → in-process; Windows user → "Restart as Administrator" relaunches elevated; Linux/macOS user → password prompt (pkexec / macOS dialog). `--minimized` → starts in the tray only. |
 
 ## Sprint 3 — Cross-platform core: Linux & macOS ✅ (spike pending)
@@ -168,7 +169,7 @@ can be cross-checked from Windows.
 | S4-5 | **Icon generator** (`app/icon.rs`). | ✅ 32 px anti-aliased circles in green `#22C55E`, red `#EF4444`, amber `#F59E0B` and grey (checking). Pixels are unit-tested. |
 | S4-6 | **egui window + tray** (`ui/`, default-on `gui` feature). | ✅ Verified on Windows with a screenshot of real data, a `WM_CLOSE` test (hides to the tray, process stays alive), and `--minimized` (window hidden, process running). If no tray is available, the app falls back to "close = quit". |
 | S4-7 | **CLI:** GUI by default. | ✅ No command or `--minimized` opens the GUI; `status`, `apply`, `revert` and `startup` are unchanged. On Windows, the console is detached when it was created only for the app. |
-| S4-8 | **CI** builds the GUI on all three OSes, plus a CLI-only (`--no-default-features`) clippy pass. | ✅ Cross-checked locally for Linux and macOS. ⏳ Green on GitHub after the next push. |
+| S4-8 | **CI** builds the GUI on all three OSes, plus a CLI-only (`--no-default-features`) clippy pass. | ✅ Green on GitHub for Windows, Ubuntu and macOS (run 45407019993). |
 
 Known limitations / follow-ups:
 - A `--minimized` start flashes the window for one frame, because eframe
@@ -180,11 +181,33 @@ Known limitations / follow-ups:
 - Binary size grew from 0.26 MB to 5.4 MB (release). `--no-default-features`
   still produces the small CLI-only build.
 
-## Sprint 5 — Background auto-heal ⏳
+## Sprint 5 — Background auto-heal ✅
 
-- Worker loop: check at launch and every `check_interval_secs` (default 60 s), then run `heal_plan`. Clock and ports are injectable so it can be tested.
-- When something drifts back to default (for example after a Windows Update) and auto-heal is on and the app is elevated, re-apply it. Then show a desktop notification (toast) and update the tray icon.
-- Decide where settings live when running under `sudo`/`pkexec` on Linux (root's `$HOME`).
+Goal: when Windows (or a Linux/macOS update) silently resets a setting, the
+app notices and re-applies it, then tells the user.
+
+Done test-first (32 tests run red, then green). The suite grew from 197 to
+218 unit tests.
+
+| ID | Story | Status |
+|----|-------|--------|
+| S5-1 | **Periodic checks in the worker.** | ✅ The worker re-checks `check_interval_secs` after each status (default 60 s, minimum 10 s) and emits `Status` on its own, even while the window is hidden. It remembers the last reboot timestamp. Tested with a 30 ms interval. |
+| S5-2 | **Heal decision in the reducer.** | ✅ Heals only when auto-heal is on, the app runs **in-process elevated** (Unix without root would prompt for a password every minute) and nothing else is in flight. A heal that "succeeds" but doesn't stick is retried only on the next periodic check, so there is no tight loop. |
+| S5-3 | **Never fight the user.** | ✅ Reverting all settings, or one, turns auto-heal off, saves that, and appends *"Auto-heal was turned off so it won't undo your change."* |
+| S5-4 | **Desktop notification.** | ✅ On success, and on a *new* heal error (repeats are suppressed). Windows: native WinRT toast, verified on the dev machine. Linux: `notify-send`. macOS: `osascript display notification`. Tray icon and tooltip update through the normal status flow. |
+| S5-5 | **Auto-heal hint** when enabled without admin/root. | ✅ Windows points to "Run at startup", which starts the app elevated at login. Linux/macOS explain that "Run at startup" re-applies at every boot. |
+| S5-6 | **Settings under `sudo`/`pkexec`.** | ✅ `config::invoking_user` reads `SUDO_UID`/`SUDO_GID`/`SUDO_USER` or `PKEXEC_UID` (ignoring root itself). The config lives in the real user's home, looked up with `getpwuid_r`/`getpwnam_r`, and ownership is handed back with `chown` after saving. |
+
+Known limitations / follow-ups:
+- On Windows, auto-heal only runs while the app is elevated, so in practice
+  when started via "Run at startup" (Task Scheduler `/rl highest`). On
+  Linux/macOS, the boot-time `startup` entry re-applies once per boot; there
+  is no root GUI running in the background.
+- Without an Explorer notification setting for the app, toasts are shown
+  under PowerShell's identity (the standard fallback for unpackaged apps).
+  A proper AppUserModelID comes with the Sprint 7 installer.
+- The end-to-end heal (an elevated GUI with real settings drifting) is on the
+  manual QA checklist.
 
 ## Sprint 6 — Live latency monitor ⏳
 

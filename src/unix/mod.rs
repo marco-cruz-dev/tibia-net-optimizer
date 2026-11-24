@@ -9,3 +9,5 @@ pub mod persist;
 pub mod route;
 pub mod service;
 pub mod sysctl;
+#[cfg(unix)]
+pub mod user;

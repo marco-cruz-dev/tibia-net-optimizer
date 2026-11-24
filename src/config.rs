@@ -40,9 +40,14 @@ impl Default for Config {
 }
 
 impl Config {
-    /// `config.json` inside [`config_dir_for`] for the running OS.
+    /// `config.json` inside [`config_dir_for`] for the running OS. Under
+    /// `sudo`/`pkexec` this is the invoking user's directory, not root's.
     pub fn default_path() -> Option<PathBuf> {
-        config_dir_for(Os::current(), |k| std::env::var(k).ok()).map(|d| d.join("config.json"))
+        #[cfg(unix)]
+        let invoking_home = crate::unix::user::invoking_home();
+        #[cfg(not(unix))]
+        let invoking_home = None;
+        config_dir_for(Os::current(), |k| std::env::var(k).ok(), invoking_home).map(|d| d.join("config.json"))
     }
 
     /// Loads settings; a missing or corrupt file yields defaults so the app
@@ -61,30 +66,83 @@ impl Config {
         }
         let json = serde_json::to_string_pretty(self).expect("Config is always serializable");
         fs::write(path, json)?;
+        // Under sudo/pkexec, give the file back to the user who ran it.
+        #[cfg(unix)]
+        crate::unix::user::hand_back(path);
         Ok(())
     }
+}
+
+/// The real user behind a `sudo` / `pkexec` run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvokingUser {
+    pub uid: Option<u32>,
+    pub gid: Option<u32>,
+    pub name: Option<String>,
+}
+
+/// Reads `SUDO_UID`/`SUDO_GID`/`SUDO_USER`, or `PKEXEC_UID`. `None` when not
+/// running through either, or when the invoking user is root itself.
+pub fn invoking_user(env: impl Fn(&str) -> Option<String>) -> Option<InvokingUser> {
+    let num = |k: &str| env(k).and_then(|v| v.trim().parse::<u32>().ok());
+    let user = if env("SUDO_UID").is_some() || env("SUDO_USER").is_some() {
+        InvokingUser {
+            uid: num("SUDO_UID"),
+            gid: num("SUDO_GID"),
+            name: env("SUDO_USER").filter(|n| !n.is_empty()),
+        }
+    } else if env("PKEXEC_UID").is_some() {
+        InvokingUser {
+            uid: num("PKEXEC_UID"),
+            gid: None,
+            name: None,
+        }
+    } else {
+        return None;
+    };
+    let is_root = user.uid == Some(0) || (user.uid.is_none() && user.name.as_deref() == Some("root"));
+    let known = user.uid.is_some() || user.name.is_some();
+    (known && !is_root).then_some(user)
 }
 
 /// Per-OS settings directory:
 /// - Windows: `%APPDATA%\TibiaNetOptimizer`
 /// - Linux: `$XDG_CONFIG_HOME/tibia-net-optimizer` (absolute only), else `~/.config/tibia-net-optimizer`
 /// - macOS: `~/Library/Application Support/TibiaNetOptimizer`
-pub fn config_dir_for(os: Os, env: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+///
+/// `invoking_home` (Linux/macOS, under sudo/pkexec) replaces root's
+/// environment with the real user's home directory.
+pub fn config_dir_for(
+    os: Os,
+    env: impl Fn(&str) -> Option<String>,
+    invoking_home: Option<String>,
+) -> Option<PathBuf> {
     let non_empty = |k: &str| env(k).filter(|v| !v.is_empty());
+    // Under sudo/pkexec, root's XDG/HOME don't apply to the real user.
+    let invoking_home = invoking_home.filter(|h| !h.is_empty());
     match os {
         Os::Windows => non_empty("APPDATA").map(|d| PathBuf::from(d).join("TibiaNetOptimizer")),
-        Os::Linux => non_empty("XDG_CONFIG_HOME")
-            .filter(|d| d.starts_with('/'))
-            .map(PathBuf::from)
-            .or_else(|| non_empty("HOME").map(|h| PathBuf::from(h).join(".config")))
-            .map(|d| d.join("tibia-net-optimizer")),
-        Os::Macos => non_empty("HOME").map(|h| {
-            PathBuf::from(h)
-                .join("Library")
-                .join("Application Support")
-                .join("TibiaNetOptimizer")
-        }),
+        Os::Linux => match invoking_home {
+            Some(home) => Some(linux_dir(PathBuf::from(home).join(".config"))),
+            None => non_empty("XDG_CONFIG_HOME")
+                .filter(|d| d.starts_with('/'))
+                .map(PathBuf::from)
+                .or_else(|| non_empty("HOME").map(|h| PathBuf::from(h).join(".config")))
+                .map(linux_dir),
+        },
+        Os::Macos => invoking_home.or_else(|| non_empty("HOME")).map(macos_dir),
     }
+}
+
+fn linux_dir(config_home: PathBuf) -> PathBuf {
+    config_home.join("tibia-net-optimizer")
+}
+
+fn macos_dir(home: String) -> PathBuf {
+    PathBuf::from(home)
+        .join("Library")
+        .join("Application Support")
+        .join("TibiaNetOptimizer")
 }
 
 #[cfg(test)]
@@ -105,10 +163,10 @@ mod tests {
         // Built with join() so the test also holds on Unix, where `\` isn't a separator.
         let appdata = r"C:\Users\me\AppData\Roaming";
         assert_eq!(
-            config_dir_for(Os::Windows, env(&[("APPDATA", appdata)])),
+            config_dir_for(Os::Windows, env(&[("APPDATA", appdata)]), None),
             Some(PathBuf::from(appdata).join("TibiaNetOptimizer"))
         );
-        assert_eq!(config_dir_for(Os::Windows, env(&[])), None);
+        assert_eq!(config_dir_for(Os::Windows, env(&[]), None), None);
     }
 
     #[test]
@@ -116,31 +174,112 @@ mod tests {
         assert_eq!(
             config_dir_for(
                 Os::Linux,
-                env(&[("XDG_CONFIG_HOME", "/xdg"), ("HOME", "/home/me")])
+                env(&[("XDG_CONFIG_HOME", "/xdg"), ("HOME", "/home/me")]),
+                None
             ),
             Some(PathBuf::from("/xdg/tibia-net-optimizer"))
         );
         assert_eq!(
             config_dir_for(
                 Os::Linux,
-                env(&[("XDG_CONFIG_HOME", "relative"), ("HOME", "/home/me")])
+                env(&[("XDG_CONFIG_HOME", "relative"), ("HOME", "/home/me")]),
+                None
             ),
             Some(PathBuf::from("/home/me/.config/tibia-net-optimizer"))
         );
         assert_eq!(
-            config_dir_for(Os::Linux, env(&[("XDG_CONFIG_HOME", ""), ("HOME", "/home/me")])),
+            config_dir_for(
+                Os::Linux,
+                env(&[("XDG_CONFIG_HOME", ""), ("HOME", "/home/me")]),
+                None
+            ),
             Some(PathBuf::from("/home/me/.config/tibia-net-optimizer"))
         );
-        assert_eq!(config_dir_for(Os::Linux, env(&[])), None);
+        assert_eq!(config_dir_for(Os::Linux, env(&[]), None), None);
     }
 
     #[test]
     fn macos_config_dir_uses_application_support() {
         assert_eq!(
-            config_dir_for(Os::Macos, env(&[("HOME", "/Users/me")])),
+            config_dir_for(Os::Macos, env(&[("HOME", "/Users/me")]), None),
             Some(PathBuf::from(
                 "/Users/me/Library/Application Support/TibiaNetOptimizer"
             ))
+        );
+    }
+
+    #[test]
+    fn invoking_user_from_sudo() {
+        assert_eq!(
+            invoking_user(env(&[
+                ("SUDO_UID", "1000"),
+                ("SUDO_GID", "1001"),
+                ("SUDO_USER", "marco")
+            ])),
+            Some(InvokingUser {
+                uid: Some(1000),
+                gid: Some(1001),
+                name: Some("marco".into())
+            })
+        );
+    }
+
+    #[test]
+    fn invoking_user_from_pkexec() {
+        assert_eq!(
+            invoking_user(env(&[("PKEXEC_UID", "1000")])),
+            Some(InvokingUser {
+                uid: Some(1000),
+                gid: None,
+                name: None
+            })
+        );
+    }
+
+    #[test]
+    fn invoking_user_tolerates_partial_env() {
+        assert_eq!(
+            invoking_user(env(&[("SUDO_UID", "garbage"), ("SUDO_USER", "marco")])),
+            Some(InvokingUser {
+                uid: None,
+                gid: None,
+                name: Some("marco".into())
+            })
+        );
+    }
+
+    #[test]
+    fn no_invoking_user_without_sudo_or_for_root() {
+        assert_eq!(invoking_user(env(&[])), None);
+        assert_eq!(
+            invoking_user(env(&[("SUDO_UID", "0"), ("SUDO_USER", "root")])),
+            None
+        );
+        assert_eq!(invoking_user(env(&[("PKEXEC_UID", "0")])), None);
+    }
+
+    #[test]
+    fn invoking_home_replaces_roots_environment_on_unix() {
+        let root_env = env(&[("HOME", "/root"), ("XDG_CONFIG_HOME", "/root/.config")]);
+        assert_eq!(
+            config_dir_for(Os::Linux, &root_env, Some("/home/marco".into())),
+            Some(PathBuf::from("/home/marco/.config/tibia-net-optimizer"))
+        );
+        assert_eq!(
+            config_dir_for(
+                Os::Macos,
+                env(&[("HOME", "/var/root")]),
+                Some("/Users/marco".into())
+            ),
+            Some(PathBuf::from(
+                "/Users/marco/Library/Application Support/TibiaNetOptimizer"
+            ))
+        );
+        let appdata = r"C:\Users\me\AppData\Roaming";
+        assert_eq!(
+            config_dir_for(Os::Windows, env(&[("APPDATA", appdata)]), Some("/ignored".into())),
+            Some(PathBuf::from(appdata).join("TibiaNetOptimizer")),
+            "Windows has no sudo"
         );
     }
 

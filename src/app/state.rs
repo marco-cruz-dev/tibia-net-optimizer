@@ -2,8 +2,10 @@
 
 use crate::actions::Action;
 use crate::config::Config;
+use crate::optimizer::heal_plan;
 use crate::platform::Os;
 use crate::report::StatusReport;
+use crate::tweak::TweakId;
 
 /// How a privileged action is carried out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -27,19 +29,30 @@ pub fn route(os: Os, elevated: bool) -> Route {
 /// Commands for the background worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerCmd {
-    Refresh { autotuning_changed_at: Option<u64> },
+    Refresh {
+        autotuning_changed_at: Option<u64>,
+    },
     Run(Action),
     RunElevated(Action),
+    /// Re-apply tweaks that drifted back to their defaults.
+    Heal(Vec<TweakId>),
 }
 
 /// Results from the background worker.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkerEvent {
+    /// After a `Refresh`, or on its own every check interval.
     Status(StatusReport),
     ActionFinished {
         action: Action,
         result: Result<(), String>,
         /// Set when a reboot-sensitive setting changed (unix seconds).
+        reboot_change_at: Option<u64>,
+    },
+    Healed {
+        /// Labels of the tweaks that were re-applied.
+        labels: Vec<String>,
+        result: Result<(), String>,
         reboot_change_at: Option<u64>,
     },
 }
@@ -70,6 +83,11 @@ pub enum Effect {
     HideWindow,
     /// Relaunch the app elevated, then quit.
     RestartElevated,
+    /// Desktop notification (toast).
+    Notify {
+        title: String,
+        body: String,
+    },
     Quit,
 }
 
@@ -102,6 +120,8 @@ impl Notice {
 
 pub const BUSY_NOTICE: &str = "Please wait - another change is in progress.";
 pub const RESTART_NOTICE: &str = "Restart as Administrator to change settings.";
+pub const APP_TITLE: &str = "Tibia Network Optimizer";
+pub const AUTO_HEAL_OFF_NOTE: &str = "Auto-heal was turned off so it won't undo your change.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppState {
@@ -110,10 +130,17 @@ pub struct AppState {
     pub config: Config,
     /// Latest status; `None` until the first check finishes.
     pub report: Option<StatusReport>,
-    /// A privileged action is in flight.
+    /// A privileged action (or heal) is in flight.
     pub busy: bool,
     pub notice: Option<Notice>,
     pub window_visible: bool,
+    /// Last heal error, so the same failure isn't notified every interval.
+    pub last_heal_error: Option<String>,
+    /// Skip healing on the status that directly follows a heal (avoids a
+    /// tight loop when a setting doesn't stick); retry on the next interval.
+    pub skip_next_heal: bool,
+    /// The current user action turned auto-heal off; mention it when done.
+    pub auto_heal_turned_off: bool,
 }
 
 impl AppState {
@@ -127,6 +154,9 @@ impl AppState {
             busy: false,
             notice: None,
             window_visible: !start_minimized,
+            last_heal_error: None,
+            skip_next_heal: false,
+            auto_heal_turned_off: false,
         };
         let effects = vec![state.refresh()];
         (state, effects)
@@ -147,8 +177,13 @@ impl AppState {
             Msg::Refresh => vec![self.refresh()],
             Msg::Worker(WorkerEvent::Status(report)) => {
                 self.report = Some(report);
-                vec![]
+                self.heal_effects()
             }
+            Msg::Worker(WorkerEvent::Healed {
+                labels,
+                result,
+                reboot_change_at,
+            }) => self.on_healed(labels, result, reboot_change_at),
             Msg::Request(action) => {
                 if self.busy {
                     self.notice = Some(Notice::info(BUSY_NOTICE));
@@ -164,7 +199,9 @@ impl AppState {
                 };
                 self.busy = true;
                 self.notice = None;
-                vec![Effect::Worker(cmd)]
+                let mut effects = self.pause_auto_heal_for(&action);
+                effects.push(Effect::Worker(cmd));
+                effects
             }
             Msg::Worker(WorkerEvent::ActionFinished {
                 action,
@@ -172,7 +209,11 @@ impl AppState {
                 reboot_change_at,
             }) => {
                 self.busy = false;
+                let note = std::mem::take(&mut self.auto_heal_turned_off);
                 self.notice = Some(match result {
+                    Ok(()) if note => {
+                        Notice::info(format!("{} {AUTO_HEAL_OFF_NOTE}", action.success_message()))
+                    }
                     Ok(()) => Notice::info(action.success_message()),
                     Err(e) => Notice::error(e),
                 });
@@ -213,6 +254,81 @@ impl AppState {
             Msg::DismissNotice => {
                 self.notice = None;
                 vec![]
+            }
+        }
+    }
+
+    /// After a status update: start a heal if auto-heal applies.
+    fn heal_effects(&mut self) -> Vec<Effect> {
+        if std::mem::take(&mut self.skip_next_heal) {
+            return vec![];
+        }
+        if !self.config.auto_heal || self.busy || self.route() != Route::InProcess {
+            return vec![];
+        }
+        let Some(report) = &self.report else {
+            return vec![];
+        };
+        let plan = heal_plan(&report.tweaks, &self.config, self.elevated);
+        if plan.is_empty() {
+            return vec![];
+        }
+        self.busy = true;
+        vec![Effect::Worker(WorkerCmd::Heal(plan))]
+    }
+
+    /// Reverting while auto-heal is on would be undone a minute later, so
+    /// auto-heal is switched off (and persisted).
+    fn pause_auto_heal_for(&mut self, action: &Action) -> Vec<Effect> {
+        let reverting = matches!(
+            action,
+            Action::RevertAll | Action::SetTweak { optimized: false, .. }
+        );
+        if !(reverting && self.config.auto_heal) {
+            return vec![];
+        }
+        self.config.auto_heal = false;
+        self.auto_heal_turned_off = true;
+        vec![Effect::SaveConfig]
+    }
+
+    fn on_healed(
+        &mut self,
+        labels: Vec<String>,
+        result: Result<(), String>,
+        reboot_change_at: Option<u64>,
+    ) -> Vec<Effect> {
+        self.busy = false;
+        match result {
+            Ok(()) => {
+                self.last_heal_error = None;
+                self.skip_next_heal = true;
+                let list = labels.join(", ");
+                self.notice = Some(Notice::info(format!("Auto-heal re-applied: {list}.")));
+                let mut effects = vec![Effect::Notify {
+                    title: APP_TITLE.into(),
+                    body: format!("Settings were reset by the system and have been re-applied: {list}."),
+                }];
+                if let Some(at) = reboot_change_at {
+                    self.config.autotuning_changed_at = Some(at);
+                    effects.push(Effect::SaveConfig);
+                }
+                effects.push(self.refresh());
+                effects
+            }
+            Err(error) => {
+                let text = format!("Auto-heal failed: {error}");
+                self.notice = Some(Notice::error(text.clone()));
+                let is_new = self.last_heal_error.as_deref() != Some(error.as_str());
+                self.last_heal_error = Some(error);
+                if is_new {
+                    vec![Effect::Notify {
+                        title: APP_TITLE.into(),
+                        body: text,
+                    }]
+                } else {
+                    vec![]
+                }
             }
         }
     }
@@ -391,6 +507,197 @@ mod tests {
         s.update(Msg::SetMinimizeToTray(false));
         assert_eq!(s.update(Msg::CloseRequested), vec![Effect::Quit]);
         assert_eq!(s.update(Msg::Quit), vec![Effect::Quit]);
+    }
+
+    // --- auto-heal ---------------------------------------------------------
+
+    use crate::tweak::{TweakState, TweakStatus};
+
+    fn drifted_report() -> StatusReport {
+        StatusReport::build(StatusInputs {
+            os: Os::Windows,
+            tweaks: vec![
+                TweakStatus::new(
+                    TweakId::WinAutoTuning,
+                    "TCP auto-tuning",
+                    TweakState::NotOptimized,
+                    "normal",
+                ),
+                TweakStatus::new(TweakId::WinNagle, "Nagle", TweakState::Optimized, "ok"),
+            ],
+            startup: Ok(true),
+            elevated: true,
+            reboot_recommended: false,
+        })
+    }
+
+    fn healing(os: Os, elevated: bool) -> AppState {
+        let config = Config {
+            auto_heal: true,
+            ..Config::default()
+        };
+        AppState::new(os, elevated, config, true).0
+    }
+
+    fn status(r: StatusReport) -> Msg {
+        Msg::Worker(WorkerEvent::Status(r))
+    }
+
+    fn healed(labels: &[&str], result: Result<(), String>) -> Msg {
+        Msg::Worker(WorkerEvent::Healed {
+            labels: labels.iter().map(|s| s.to_string()).collect(),
+            result,
+            reboot_change_at: None,
+        })
+    }
+
+    #[test]
+    fn drift_triggers_heal_when_elevated_and_enabled() {
+        let mut s = healing(Os::Windows, true);
+        assert_eq!(
+            s.update(status(drifted_report())),
+            vec![Effect::Worker(WorkerCmd::Heal(vec![TweakId::WinAutoTuning]))]
+        );
+        assert!(s.busy);
+    }
+
+    #[test]
+    fn no_heal_when_disabled_not_elevated_busy_or_optimized() {
+        let mut off = state(Os::Windows, true);
+        assert!(off.update(status(drifted_report())).is_empty(), "auto-heal off");
+
+        for (os, elevated) in [(Os::Windows, false), (Os::Linux, false)] {
+            let mut s = healing(os, elevated);
+            assert!(
+                s.update(status(drifted_report())).is_empty(),
+                "{os:?} not elevated"
+            );
+        }
+
+        let mut busy = healing(Os::Windows, true);
+        busy.busy = true;
+        assert!(busy.update(status(drifted_report())).is_empty(), "busy");
+
+        let mut fine = healing(Os::Windows, true);
+        assert!(fine.update(status(report())).is_empty(), "nothing drifted");
+    }
+
+    #[test]
+    fn successful_heal_notifies_and_refreshes() {
+        let mut s = healing(Os::Windows, true);
+        s.update(status(drifted_report()));
+        let effects = s.update(healed(&["TCP auto-tuning"], Ok(())));
+        assert_eq!(
+            effects,
+            vec![
+                Effect::Notify {
+                    title: APP_TITLE.into(),
+                    body: "Settings were reset by the system and have been re-applied: TCP auto-tuning."
+                        .into()
+                },
+                refresh_effect(None),
+            ]
+        );
+        assert!(!s.busy);
+        assert_eq!(
+            s.notice,
+            Some(Notice::info("Auto-heal re-applied: TCP auto-tuning."))
+        );
+    }
+
+    #[test]
+    fn heal_that_does_not_stick_waits_for_the_next_interval() {
+        let mut s = healing(Os::Windows, true);
+        s.update(status(drifted_report()));
+        s.update(healed(&["TCP auto-tuning"], Ok(())));
+        assert!(
+            s.update(status(drifted_report())).is_empty(),
+            "no immediate retry"
+        );
+        assert_eq!(
+            s.update(status(drifted_report())),
+            vec![Effect::Worker(WorkerCmd::Heal(vec![TweakId::WinAutoTuning]))],
+            "next periodic check retries"
+        );
+    }
+
+    #[test]
+    fn heal_errors_notify_once_per_distinct_error() {
+        let mut s = healing(Os::Windows, true);
+        s.update(status(drifted_report()));
+        let first = s.update(healed(&[], Err("TCP auto-tuning: access denied".into())));
+        assert_eq!(
+            first,
+            vec![Effect::Notify {
+                title: APP_TITLE.into(),
+                body: "Auto-heal failed: TCP auto-tuning: access denied".into()
+            }]
+        );
+        assert_eq!(
+            s.notice,
+            Some(Notice::error("Auto-heal failed: TCP auto-tuning: access denied"))
+        );
+        assert!(!s.busy);
+
+        s.update(status(drifted_report()));
+        assert!(
+            s.update(healed(&[], Err("TCP auto-tuning: access denied".into())))
+                .is_empty(),
+            "same error is not re-notified"
+        );
+        s.update(status(drifted_report()));
+        assert_eq!(
+            s.update(healed(&[], Err("other".into()))).len(),
+            1,
+            "new error is notified"
+        );
+    }
+
+    #[test]
+    fn heal_reboot_change_is_persisted() {
+        let mut s = healing(Os::Windows, true);
+        s.update(status(drifted_report()));
+        let effects = s.update(Msg::Worker(WorkerEvent::Healed {
+            labels: vec!["TCP auto-tuning".into()],
+            result: Ok(()),
+            reboot_change_at: Some(99),
+        }));
+        assert!(effects.contains(&Effect::SaveConfig));
+        assert!(effects.contains(&refresh_effect(Some(99))));
+        assert_eq!(s.config.autotuning_changed_at, Some(99));
+    }
+
+    #[test]
+    fn reverting_turns_auto_heal_off_and_says_so() {
+        for action in [
+            Action::RevertAll,
+            Action::SetTweak {
+                id: TweakId::WinNagle,
+                optimized: false,
+            },
+        ] {
+            let mut s = healing(Os::Windows, true);
+            assert_eq!(
+                s.update(Msg::Request(action)),
+                vec![Effect::SaveConfig, Effect::Worker(WorkerCmd::Run(action))]
+            );
+            assert!(!s.config.auto_heal);
+            s.update(finished(action, Ok(()), None));
+            let text = s.notice.clone().unwrap().text;
+            assert!(text.ends_with(AUTO_HEAL_OFF_NOTE), "{text}");
+        }
+    }
+
+    #[test]
+    fn applying_keeps_auto_heal_on() {
+        let mut s = healing(Os::Windows, true);
+        assert_eq!(
+            s.update(Msg::Request(Action::ApplyAll)),
+            vec![Effect::Worker(WorkerCmd::Run(Action::ApplyAll))]
+        );
+        assert!(s.config.auto_heal);
+        s.update(finished(Action::ApplyAll, Ok(()), None));
+        assert_eq!(s.notice, Some(Notice::info("Optimizations applied.")));
     }
 
     #[test]

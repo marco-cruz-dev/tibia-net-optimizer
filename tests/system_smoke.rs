@@ -72,6 +72,22 @@ fn queries_real_startup_task() {
     println!("startup task registered: {registered}");
 }
 
+/// Shows a real toast, so it only runs when asked explicitly:
+/// `$env:TNO_TOAST_TEST=1; cargo test --test system_smoke -- --ignored shows_a_toast`
+#[test]
+#[ignore]
+fn shows_a_toast() {
+    if std::env::var("TNO_TOAST_TEST").is_err() {
+        eprintln!("skipped: set TNO_TOAST_TEST=1");
+        return;
+    }
+    tibia_net_optimizer::system::notify::send(
+        "Tibia Network Optimizer",
+        "Test notification from the smoke tests - you can dismiss it.",
+    )
+    .expect("toast should be shown");
+}
+
 #[test]
 #[ignore]
 fn elevation_and_boot_time_are_readable() {

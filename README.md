@@ -5,8 +5,8 @@ that **Tibia** stops dropping inputs, losing spell casts and rubber-banding on
 distant servers (for example Secura in Frankfurt played from Portugal), even
 when ping looks fine. It runs on **Windows**, **Linux** and **macOS**.
 
-> **Status: Sprint 4 of 7 done.** The app has a tray icon and dashboard, plus a full CLI, on all three OSes.
-> Next is background auto-heal. See [docs/BACKLOG.md](docs/BACKLOG.md).
+> **Status: Sprint 5 of 7 done.** The app has a tray icon, dashboard, auto-heal with desktop notifications, and a full CLI,
+> on all three OSes. Next is the live ping/jitter monitor. See [docs/BACKLOG.md](docs/BACKLOG.md).
 
 ## Why
 
@@ -18,7 +18,7 @@ delay them add latency and jitter:
 | **Receive-window auto-tuning** (buffers resized on the fly cause jitter) | `netsh int tcp set global autotuninglevel=disabled` | `net.ipv4.tcp_moderate_rcvbuf=0` | `net.inet.tcp.doautorcvbuf=0` |
 | **Delayed ACK** (ACKs held for up to 40–200 ms) | `TcpAckFrequency=1` per connected interface (registry) | `quickack 1` on default routes | `net.inet.tcp.delayed_ack=0` |
 | **Small-packet coalescing** (steps and hotkeys bundled) | `TCPNoDelay=1` per connected interface (registry) | `net.ipv4.tcp_autocorking=0` | — (per socket only) |
-| **Persistence** (updates/reboots reset settings) | Registry/netsh persist; auto-heal planned | `/etc/sysctl.d/99-tibia-net-optimizer.conf` + NetworkManager hook | LaunchDaemon that re-applies at boot |
+| **Persistence** (updates/reboots reset settings) | Auto-heal: re-checked every 60 s and re-applied | `/etc/sysctl.d/99-tibia-net-optimizer.conf` + NetworkManager hook | LaunchDaemon that re-applies at boot |
 
 Every change can be reverted. On Linux and macOS the original values are
 recorded and restored.
@@ -39,7 +39,8 @@ recorded and restored.
 - [x] Settings in the OS-appropriate config directory.
 - [x] Latency, jitter and packet-loss statistics engine.
 - [x] **Dashboard + system tray**: a colour-coded tray icon (green/red/amber), a status banner, a card per setting with a toggle and explanation, Optimize Now / Revert, and automation checkboxes. Closing the window minimizes it to the tray.
-- [ ] Background auto-heal with notifications (Sprint 5).
+- [x] **Auto-heal**: re-checks every 60 s (also from the tray) and re-applies anything the OS reset, with a desktop notification. It never undoes your own Revert: reverting turns auto-heal off. It needs admin rights, so on Windows use 'Run at startup' to have the app start elevated.
+- [x] Under sudo/pkexec, settings stay in your own config folder.
 - [ ] Live ping and jitter monitor for Secura/Frankfurt (Sprint 6).
 
 ## Usage
