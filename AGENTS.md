@@ -68,6 +68,9 @@ There is no backlog file. **GitHub issues and the
   `type:`, one `area:` and one `priority:` label, plus the next release milestone.
 - Work on one issue per branch and PR. Put `Closes #N` in the PR body, and move the card to
   *In progress*, then *In review*.
+- When you create a PR, assign it to the person who asked you to create it (`gh pr create --assignee <login>`)
+  and give it labels: the same `type:`, `area:` and `priority:` labels as the issue it closes, or one of each
+  that fits if it closes none.
 - Don't commit or push unless asked.
 
 ## Releases
