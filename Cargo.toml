@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.95"
 license = "GPL-3.0-only"
-description = "Windows tray utility that tunes TCP settings (auto-tuning, Nagle) for low-latency Tibia play"
+description = "Tray utility for Windows, Linux and macOS that tunes TCP settings (auto-tuning, Nagle, delayed ACK) for low-latency Tibia play"
 readme = "README.md"
-repository = "https://github.com/marco-cruz-dev/TibiaNetOptimizer"
+repository = "https://github.com/marco-cruz-dev/tibia-net-optimizer"
 # Two binaries: the dashboard (`tibia-net-optimizer`, src/main.rs) and the
 # command line (`tno`, src/bin/tno.rs). `cargo run` starts the dashboard.
 default-run = "tibia-net-optimizer"

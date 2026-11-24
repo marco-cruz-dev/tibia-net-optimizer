@@ -5,8 +5,10 @@ that **Tibia** stops dropping inputs, losing spell casts and rubber-banding on
 distant servers (for example Secura in Frankfurt played from Portugal), even
 when ping looks fine. It runs on **Windows**, **Linux** and **macOS**.
 
-> **Status: all 7 sprints done; preparing release 0.1.0.** Dashboard + tray, auto-heal, live connection
-> monitor and a full CLI on Windows, Linux and macOS. See [CHANGELOG.md](CHANGELOG.md) and [docs/BACKLOG.md](docs/BACKLOG.md).
+> **Status: [v0.1.0 released](https://github.com/marco-cruz-dev/tibia-net-optimizer/releases/tag/v0.1.0).** Dashboard + tray, auto-heal, live connection
+> monitor and a full CLI on Windows, Linux and macOS. See [CHANGELOG.md](CHANGELOG.md). Planned work lives in
+> [GitHub issues](https://github.com/marco-cruz-dev/tibia-net-optimizer/issues) and the
+> [project board](https://github.com/users/marco-cruz-dev/projects/2).
 
 ## Why
 
@@ -24,7 +26,7 @@ Every change can be reverted. On Linux and macOS the original values are
 recorded and restored.
 
 > The Linux/macOS benefit for Tibia is still to be measured
-> ([spike S3-0](docs/spikes/S3-0-unix-tweaks.md)). Tweaks that don't help will
+> ([spike #54](https://github.com/marco-cruz-dev/tibia-net-optimizer/issues/54)). Tweaks that don't help will
 > be dropped.
 
 ## Features
@@ -47,7 +49,7 @@ recorded and restored.
 ## Install
 
 Download the package for your OS from the
-[Releases](https://github.com/marco-cruz-dev/TibiaNetOptimizer/releases) page
+[Releases](https://github.com/marco-cruz-dev/tibia-net-optimizer/releases) page
 and extract it. Each package contains two programs:
 
 | Program | What it is |
@@ -142,11 +144,20 @@ and macOS** ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
 
 This project uses short, agile sprints and test-driven development:
 
-1. Pick the next story in [docs/BACKLOG.md](docs/BACKLOG.md).
+1. Pick the next issue from the [project board](https://github.com/users/marco-cruz-dev/projects/2) and move it to *In progress*.
 2. **Red:** write the tests against a stub (`todo!()`) and watch them fail.
 3. **Green:** write the smallest change that makes them pass.
 4. **Refactor:** clean up while keeping the tests green, then run clippy (for all three targets) and fmt.
-5. Update the backlog and README, then commit.
+5. Update the README, then open a PR that closes the issue.
+
+**Definition of Done**
+
+1. The behaviour is specified by a failing test first (red → green → refactor).
+2. OS side effects go through a port (`CommandRunner`, `InterfaceRegistry`, …) with a fake for tests.
+3. `cargo fmt`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.
+4. Real adapters have an `#[ignore]`d **read-only** smoke test. Tests never modify system settings.
+5. The README is updated. Changes that can't be tested automatically are added to the
+   [manual QA checklist](https://github.com/marco-cruz-dev/tibia-net-optimizer/issues/55).
 
 ### Architecture
 
@@ -201,9 +212,6 @@ src/
 tests/
 ├── system_smoke.rs      Windows read-only smoke tests
 └── unix_smoke.rs        Linux/macOS read-only smoke tests
-docs/
-├── BACKLOG.md           Sprint plan, Definition of Done, manual QA checklist
-└── spikes/              Investigations (S3-0: Unix tweak effectiveness)
 ```
 
 ## Disclaimer

@@ -21,5 +21,5 @@ First release.
 - **Windows extras:** the `.exe` has an icon, an `asInvoker` + PerMonitorV2 manifest and version info. The dashboard starts without a console window.
 
 ### Notes
-- The Linux/macOS benefit for Tibia hasn't been measured yet (see `docs/spikes/S3-0-unix-tweaks.md`).
+- The Linux/macOS benefit for Tibia hasn't been measured yet (see [#54](https://github.com/marco-cruz-dev/tibia-net-optimizer/issues/54)).
 - Release binaries aren't code-signed. Windows SmartScreen and macOS Gatekeeper will warn on first launch.
