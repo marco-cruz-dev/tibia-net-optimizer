@@ -40,14 +40,25 @@ fn reads_a_well_known_sysctl_key() {
     assert!(!value.is_empty());
 }
 
-/// Needs internet access: TCP-connect probe to the default Frankfurt target.
+/// ICMP through the system `ping` binary, to loopback (no internet needed).
 #[test]
 #[ignore]
-fn probes_the_default_target() {
-    use tibia_net_optimizer::network::probe::{parse_target, probe_once, DEFAULT_TARGET};
-    let target = parse_target(DEFAULT_TARGET).unwrap();
-    let rtt = probe_once(&target, std::time::Duration::from_secs(3)).expect("default target should answer");
-    println!("{DEFAULT_TARGET}: {rtt:?}");
+fn pings_loopback_with_system_ping() {
+    use tibia_net_optimizer::network::probe::icmp_echo;
+    let rtt = icmp_echo("127.0.0.1".parse().unwrap(), std::time::Duration::from_secs(2))
+        .expect("loopback should answer ping");
+    println!("127.0.0.1: {rtt:?}");
+}
+
+/// Reads the real connection table (prints the Tibia target if running).
+#[test]
+#[ignore]
+fn reads_connections() {
+    use tibia_net_optimizer::network::gameconn::{detect_game_targets, system_connections};
+    let source = system_connections();
+    let conns = source.established().expect("connection table should be readable");
+    println!("{} established connections", conns.len());
+    println!("Tibia game target: {:?}", detect_game_targets(source.as_ref()));
 }
 
 #[test]

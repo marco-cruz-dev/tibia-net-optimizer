@@ -20,7 +20,7 @@ gui = ["dep:eframe", "dep:tray-icon", "dep:tauri-winrt-notification"]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 # glow (OpenGL) instead of the default wgpu keeps the binary small.
-eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"], optional = true }
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "x11", "wayland", "clipboard"], optional = true }
 tray-icon = { version = "0.26", default-features = false, optional = true }
 
 # Linux tray via the pure-Rust StatusNotifierItem (D-Bus) backend: no GTK or
@@ -41,6 +41,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_Networking_WinSock",
     "Win32_Security",
     "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_IO",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_UI_Shell",

@@ -41,7 +41,8 @@ recorded and restored.
 - [x] **Dashboard + system tray**: a colour-coded tray icon (green/red/amber), a status banner, a card per setting with a toggle and explanation, Optimize Now / Revert, and automation checkboxes. Closing the window minimizes it to the tray.
 - [x] **Auto-heal**: re-checks every 60 s (also from the tray) and re-applies anything the OS reset, with a desktop notification. It never undoes your own Revert: reverting turns auto-heal off. It needs admin rights, so on Windows use 'Run at startup' to have the app start elevated.
 - [x] Under sudo/pkexec, settings stay in your own config folder.
-- [x] **Live connection monitor**: current ping, average, **jitter** (what makes steps stutter) and packet loss, with a sparkline. The default target is a Frankfurt test server (`fra-de-ping.vultr.com`, near Secura); enter any host, or `host:port` for a TCP probe. It uses ICMP on Windows (no admin needed) and TCP elsewhere, and only runs while the window is open.
+- [x] **Live connection monitor**: finds your running Tibia client's game connection and pings it (ICMP only), showing ping, average, **jitter** (what makes steps stutter), packet loss and a sparkline. Tibia routes game traffic through Cloudflare, so this measures you → your nearest Cloudflare entry point (for example Lisbon, ~11 ms). That is the part your ISP and Wi-Fi affect. It follows relogs and world changes, skips game hosts that block ping, and runs only while the window is open.
+- [x] **Copy diagnostics**: one click copies a text summary of everything on screen; all text is selectable too.
 
 ## Usage
 

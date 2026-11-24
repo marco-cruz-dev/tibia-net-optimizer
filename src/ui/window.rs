@@ -9,13 +9,14 @@ use eframe::egui::{self, Color32, RichText};
 
 use super::tray::Tray;
 use crate::actions::Action;
-use crate::app::icon::{circle_rgba, tone_rgb, GREY};
-use crate::app::ping::{PingMonitor, PING_INTERVAL, PROBE_TIMEOUT};
+use crate::app::icon::{app_icon_rgba, tone_rgb, WINDOW_ICON_SIZE};
+use crate::app::ping::{GameProbe, PingMonitor, PING_INTERVAL, PROBE_TIMEOUT};
 use crate::app::state::{AppState, Effect, Msg, NoticeKind, PING_WINDOW};
-use crate::app::view::{PingView, Tone, TrayView, View};
+use crate::app::view::{diagnostics, PingView, Tone, TrayView, View, PING_EXPLAINER};
 use crate::app::worker::Worker;
 use crate::config::Config;
-use crate::network::probe::{parse_target, probe_once};
+use crate::network::gameconn::{detect_game_targets, system_connections};
+use crate::network::probe::icmp_echo;
 use crate::platform::{self, Os};
 use crate::system::{elevation, notify};
 
@@ -30,9 +31,9 @@ pub fn run(minimized: bool) -> Result<(), String> {
     let (state, effects) = AppState::new(os, elevated, config, minimized);
 
     let icon = egui::IconData {
-        rgba: circle_rgba(64, GREY),
-        width: 64,
-        height: 64,
+        rgba: app_icon_rgba(WINDOW_ICON_SIZE),
+        width: WINDOW_ICON_SIZE,
+        height: WINDOW_ICON_SIZE,
     };
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -81,6 +82,8 @@ impl Dashboard {
         config_path: Option<PathBuf>,
     ) -> Self {
         let ctx = cc.egui_ctx.clone();
+        // All text can be selected and copied (Ctrl+C) with the clipboard feature.
+        ctx.all_styles_mut(|s| s.interaction.selectable_labels = true);
         let (tx, ui_events) = mpsc::channel();
 
         let wake = ctx.clone();
@@ -162,14 +165,17 @@ impl Dashboard {
                     }
                 });
             }
-            Effect::StartPing { target, generation } => {
-                // The reducer validated the target already.
-                let Ok(target) = parse_target(&target) else { return };
+            Effect::StartPing { generation } => {
                 let (tx, wake) = (self.ui_tx.clone(), ctx.clone());
+                let source = system_connections();
+                let mut probe = GameProbe::new(
+                    move || detect_game_targets(source.as_ref()),
+                    |ip| icmp_echo(ip, PROBE_TIMEOUT),
+                );
                 // Replacing the monitor drops (stops) the previous one.
                 self.ping = Some(PingMonitor::start(
                     generation,
-                    Box::new(move || probe_once(&target, PROBE_TIMEOUT)),
+                    Box::new(move || probe.tick()),
                     PING_INTERVAL,
                     move |sample| {
                         let _ = tx.send(Msg::Ping(sample));
@@ -182,24 +188,18 @@ impl Dashboard {
         }
     }
 
-    fn render_ping(ui: &mut egui::Ui, p: &PingView, out: &mut Vec<Msg>) {
-        ui.label(RichText::new("Live Connection Monitor").strong());
-        ui.horizontal(|ui| {
-            let mut target = p.target_input.clone();
-            let edit = ui
-                .add_enabled(
-                    !p.running,
-                    egui::TextEdit::singleline(&mut target).desired_width(190.0),
-                )
-                .on_hover_text("Host or IP, optionally with :port (TCP). Default: a Frankfurt test server.");
-            if edit.changed() {
-                out.push(Msg::PingTargetEdited(target));
-            }
-            ui.label(RichText::new(&p.method).small().weak());
-            if ui.button(p.button).clicked() {
-                out.push(if p.running { Msg::PingStop } else { Msg::PingStart });
-            }
-        });
+    fn render_ping(ui: &mut egui::Ui, p: &PingView) {
+        ui.label(RichText::new("Live Connection Monitor").strong())
+            .on_hover_text(PING_EXPLAINER);
+        ui.label(RichText::new(p.status).small())
+            .on_hover_text(PING_EXPLAINER);
+        if let Some(target) = &p.target {
+            ui.label(
+                RichText::new(format!("Entry point: {target} (ICMP)"))
+                    .small()
+                    .weak(),
+            );
+        }
         egui::Grid::new("ping-stats")
             .num_columns(4)
             .spacing([18.0, 2.0])
@@ -215,9 +215,7 @@ impl Dashboard {
                 ui.end_row();
             });
         sparkline(ui, &p.points);
-        if p.paused {
-            ui.label(RichText::new("Paused while the window is hidden.").small().weak());
-        } else if let Some(e) = &p.error {
+        if let Some(e) = &p.error {
             ui.label(
                 RichText::new(format!("Last probe failed: {e}"))
                     .small()
@@ -320,7 +318,7 @@ impl Dashboard {
         });
 
         ui.separator();
-        Self::render_ping(ui, ping, &mut out);
+        Self::render_ping(ui, ping);
 
         ui.separator();
         ui.label(RichText::new("Automation").strong());
@@ -355,6 +353,15 @@ impl Dashboard {
 
         if let Some(text) = view.reboot_notice {
             ui.label(RichText::new(text).color(colour(Tone::Warn)));
+        }
+        ui.separator();
+        if ui
+            .button("Copy diagnostics")
+            .on_hover_text("Copies a text summary of everything shown here, for sharing or bug reports.")
+            .clicked()
+        {
+            ui.ctx().copy_text(diagnostics(&self.state));
+            out.push(Msg::DiagnosticsCopied);
         }
         if let Some(notice) = &view.notice {
             ui.horizontal(|ui| {

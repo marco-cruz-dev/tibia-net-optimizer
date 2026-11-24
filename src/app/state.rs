@@ -3,7 +3,6 @@
 use crate::actions::Action;
 use crate::config::Config;
 use crate::network::ping::LatencyStats;
-use crate::network::probe::parse_target;
 use crate::optimizer::heal_plan;
 use crate::platform::Os;
 use crate::report::StatusReport;
@@ -59,23 +58,33 @@ pub enum WorkerEvent {
     },
 }
 
-/// One latency probe result from the monitor thread.
+/// What one monitor tick found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PingOutcome {
+    /// The Tibia client isn't connected to a game world.
+    NoGame,
+    Reply(std::time::Duration),
+    /// No reply (counts as packet loss), with the reason.
+    Lost(String),
+    /// Connected, but none of the game connections answer ICMP (some hosts
+    /// block it). Not packet loss; TCP probing is deliberately not used.
+    NotPingable(Vec<std::net::IpAddr>),
+}
+
+/// One tick of the connection monitor.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PingSample {
     /// Which monitor run produced it (stale samples are ignored).
     pub generation: u64,
-    /// `None` = lost / timed out.
-    pub rtt: Option<std::time::Duration>,
-    pub error: Option<String>,
+    /// The game connection's remote address (Tibia's Cloudflare entry point).
+    pub target: Option<std::net::IpAddr>,
+    pub outcome: PingOutcome,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Msg {
     Worker(WorkerEvent),
-    /// Latency monitor: target text edited, Start, Stop, sample received.
-    PingTargetEdited(String),
-    PingStart,
-    PingStop,
+    /// A connection monitor tick.
     Ping(PingSample),
     Refresh,
     /// A button, toggle, checkbox or tray item asking to change the system.
@@ -90,7 +99,11 @@ pub enum Msg {
     CloseRequested,
     Quit,
     DismissNotice,
+    /// "Copy diagnostics" put the summary on the clipboard.
+    DiagnosticsCopied,
 }
+
+pub const COPIED_NOTICE: &str = "Diagnostics copied to the clipboard.";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Effect {
@@ -105,9 +118,8 @@ pub enum Effect {
         title: String,
         body: String,
     },
-    /// Start (replacing any running) latency monitor for `target`.
+    /// Start (replacing any running) connection monitor.
     StartPing {
-        target: String,
         generation: u64,
     },
     StopPing,
@@ -117,16 +129,21 @@ pub enum Effect {
 /// Samples kept for stats and the sparkline (≈2 minutes at one per 2 s).
 pub const PING_WINDOW: usize = 60;
 
-/// Live latency monitor state.
+/// Live connection monitor state. It runs automatically while the dashboard
+/// is visible.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PingState {
-    /// Text in the target box (saved to config on Start).
-    pub target_input: String,
-    /// The user pressed Start (stays true while hidden in the tray).
-    pub running: bool,
-    /// A monitor thread is actually probing (running and window visible).
+    /// A monitor thread is probing (the window is visible).
     pub active: bool,
     pub generation: u64,
+    /// The game connection being measured; `None` while Tibia isn't connected.
+    pub target: Option<std::net::IpAddr>,
+    /// The last tick found no game connection.
+    pub waiting_for_game: bool,
+    /// The edge the current `stats` belong to (survives brief disconnects).
+    pub stats_for: Option<std::net::IpAddr>,
+    /// Connected, but these game connections don't answer ICMP.
+    pub not_pingable: Vec<std::net::IpAddr>,
     pub stats: LatencyStats,
     pub last_error: Option<String>,
 }
@@ -188,14 +205,16 @@ impl AppState {
     /// Initial state plus the effects to run at startup.
     pub fn new(os: Os, elevated: bool, config: Config, start_minimized: bool) -> (Self, Vec<Effect>) {
         let ping = PingState {
-            target_input: config.ping_target.clone(),
-            running: false,
             active: false,
             generation: 0,
+            target: None,
+            waiting_for_game: false,
+            stats_for: None,
+            not_pingable: Vec::new(),
             stats: LatencyStats::new(PING_WINDOW),
             last_error: None,
         };
-        let state = AppState {
+        let mut state = AppState {
             ping,
             os,
             elevated,
@@ -208,7 +227,8 @@ impl AppState {
             skip_next_heal: false,
             auto_heal_turned_off: false,
         };
-        let effects = vec![state.refresh()];
+        let mut effects = vec![state.refresh()];
+        effects.extend(state.sync_ping());
         (state, effects)
     }
 
@@ -225,15 +245,6 @@ impl AppState {
     pub fn update(&mut self, msg: Msg) -> Vec<Effect> {
         match msg {
             Msg::Refresh => vec![self.refresh()],
-            Msg::PingTargetEdited(text) => {
-                self.ping.target_input = text;
-                vec![]
-            }
-            Msg::PingStart => self.ping_start(),
-            Msg::PingStop => {
-                self.ping.running = false;
-                self.sync_ping()
-            }
             Msg::Ping(sample) => {
                 self.on_ping(sample);
                 vec![]
@@ -322,40 +333,20 @@ impl AppState {
                 self.notice = None;
                 vec![]
             }
+            Msg::DiagnosticsCopied => {
+                self.notice = Some(Notice::info(COPIED_NOTICE));
+                vec![]
+            }
         }
     }
 
-    /// Validates the target, remembers it, resets the stats and starts.
-    fn ping_start(&mut self) -> Vec<Effect> {
-        let input = self.ping.target_input.trim().to_string();
-        if let Err(e) = parse_target(&input) {
-            self.notice = Some(Notice::error(format!("Invalid ping target: {e}")));
-            return vec![];
-        }
-        let mut effects = Vec::new();
-        if self.config.ping_target != input {
-            self.config.ping_target = input.clone();
-            effects.push(Effect::SaveConfig);
-        }
-        self.ping.target_input = input;
-        self.ping.running = true;
-        self.ping.stats.clear();
-        self.ping.last_error = None;
-        // A Start while already probing restarts with the (new) target.
-        self.ping.active = false;
-        effects.extend(self.sync_ping());
-        effects
-    }
-
-    /// Probes run only while the user wants them *and* the window is visible.
+    /// The monitor runs exactly while the dashboard is visible.
     fn sync_ping(&mut self) -> Vec<Effect> {
-        let wanted = self.ping.running && self.window_visible;
-        match (wanted, self.ping.active) {
+        match (self.window_visible, self.ping.active) {
             (true, false) => {
                 self.ping.generation += 1;
                 self.ping.active = true;
                 vec![Effect::StartPing {
-                    target: self.config.ping_target.clone(),
                     generation: self.ping.generation,
                 }]
             }
@@ -367,12 +358,45 @@ impl AppState {
         }
     }
 
+    /// No game → waiting (not loss). A new target (relog / world change)
+    /// starts fresh stats. Stale samples are ignored.
     fn on_ping(&mut self, sample: PingSample) {
         if !self.ping.active || sample.generation != self.ping.generation {
             return; // from a stopped or replaced monitor
         }
-        self.ping.stats.record(sample.rtt);
-        self.ping.last_error = sample.error;
+        let p = &mut self.ping;
+        let rtt = match sample.outcome {
+            PingOutcome::NotPingable(addrs) => {
+                p.not_pingable = addrs;
+                p.waiting_for_game = false;
+                p.target = None;
+                p.last_error = None;
+                return;
+            }
+            PingOutcome::NoGame => {
+                p.waiting_for_game = true;
+                p.not_pingable.clear();
+                p.target = None;
+                p.last_error = None;
+                return;
+            }
+            PingOutcome::Reply(rtt) => {
+                p.last_error = None;
+                Some(rtt)
+            }
+            PingOutcome::Lost(reason) => {
+                p.last_error = Some(reason);
+                None
+            }
+        };
+        if sample.target != p.stats_for {
+            p.stats.clear();
+            p.stats_for = sample.target;
+        }
+        p.target = sample.target;
+        p.waiting_for_game = false;
+        p.not_pingable.clear();
+        p.stats.record(rtt);
     }
 
     /// After a status update: start a heal if auto-heal applies.
@@ -616,9 +640,16 @@ mod tests {
     #[test]
     fn close_hides_to_tray_or_quits() {
         let mut s = state(Os::Windows, true);
-        assert_eq!(s.update(Msg::CloseRequested), vec![Effect::HideWindow]);
+        // The connection monitor pauses with the window and resumes with it.
+        assert_eq!(
+            s.update(Msg::CloseRequested),
+            vec![Effect::HideWindow, Effect::StopPing]
+        );
         assert!(!s.window_visible);
-        assert_eq!(s.update(Msg::ShowDashboard), vec![Effect::ShowWindow]);
+        assert_eq!(
+            s.update(Msg::ShowDashboard),
+            vec![Effect::ShowWindow, Effect::StartPing { generation: 2 }]
+        );
         assert!(s.window_visible);
 
         s.update(Msg::SetMinimizeToTray(false));
@@ -817,119 +848,127 @@ mod tests {
         assert_eq!(s.notice, Some(Notice::info("Optimizations applied.")));
     }
 
-    // --- latency monitor ---------------------------------------------------
+    // --- connection monitor ------------------------------------------------
 
-    fn sample(generation: u64, ms: Option<u64>) -> Msg {
+    const EDGE: &str = "2606:4700:90:0:4b6e:7f99:a2f2:fd80";
+    const OTHER_EDGE: &str = "2606:4700:90::1";
+
+    fn tick(generation: u64, target: Option<&str>, outcome: PingOutcome) -> Msg {
         Msg::Ping(PingSample {
             generation,
-            rtt: ms.map(std::time::Duration::from_millis),
-            error: ms.is_none().then(|| "timed out".to_string()),
+            target: target.map(|t| t.parse().unwrap()),
+            outcome,
         })
     }
 
+    fn reply(ms: u64) -> PingOutcome {
+        PingOutcome::Reply(std::time::Duration::from_millis(ms))
+    }
+
     #[test]
-    fn ping_starts_with_saved_target_and_new_generation() {
-        let mut s = state(Os::Windows, false);
-        assert_eq!(s.ping.target_input, crate::config::DEFAULT_PING_TARGET);
-        s.update(Msg::PingTargetEdited(" 1.2.3.4:7172 ".into()));
+    fn monitor_starts_with_a_visible_window() {
+        let (s, effects) = AppState::new(Os::Windows, false, Config::default(), false);
         assert_eq!(
-            s.update(Msg::PingStart),
-            vec![
-                Effect::SaveConfig,
-                Effect::StartPing {
-                    target: "1.2.3.4:7172".into(),
-                    generation: 1
-                }
-            ]
+            effects,
+            vec![refresh_effect(None), Effect::StartPing { generation: 1 }]
         );
-        assert_eq!(s.config.ping_target, "1.2.3.4:7172");
-        assert!(s.ping.running && s.ping.active);
+        assert!(s.ping.active);
     }
 
     #[test]
-    fn ping_start_with_unchanged_target_does_not_save() {
-        let mut s = state(Os::Windows, false);
-        assert_eq!(
-            s.update(Msg::PingStart),
-            vec![Effect::StartPing {
-                target: crate::config::DEFAULT_PING_TARGET.into(),
-                generation: 1
-            }]
-        );
+    fn monitor_does_not_start_minimized() {
+        let (s, effects) = AppState::new(Os::Windows, false, Config::default(), true);
+        assert_eq!(effects, vec![refresh_effect(None)]);
+        assert!(!s.ping.active);
     }
 
     #[test]
-    fn invalid_target_is_rejected_with_a_notice() {
+    fn replies_feed_stats_for_the_detected_edge() {
         let mut s = state(Os::Windows, false);
-        s.update(Msg::PingTargetEdited("host:abc".into()));
-        assert!(s.update(Msg::PingStart).is_empty());
-        assert!(!s.ping.running);
-        let notice = s.notice.clone().unwrap();
-        assert_eq!(notice.kind, NoticeKind::Error);
-        assert!(notice.text.starts_with("Invalid ping target"), "{}", notice.text);
-    }
-
-    #[test]
-    fn samples_feed_stats_and_stale_ones_are_ignored() {
-        let mut s = state(Os::Windows, false);
-        s.update(Msg::PingStart);
-        s.update(sample(1, Some(50)));
-        s.update(sample(1, None));
-        s.update(sample(0, Some(999))); // from an older run
-        assert_eq!(s.ping.stats.samples_ms(), vec![Some(50.0), None]);
+        s.update(tick(1, Some(EDGE), reply(11)));
+        s.update(tick(1, Some(EDGE), PingOutcome::Lost("timed out".into())));
+        assert_eq!(s.ping.target, Some(EDGE.parse().unwrap()));
+        assert_eq!(s.ping.stats.samples_ms(), vec![Some(11.0), None]);
         assert_eq!(s.ping.last_error.as_deref(), Some("timed out"));
-        s.update(sample(1, Some(52)));
-        assert_eq!(s.ping.last_error, None, "cleared by a success");
+        s.update(tick(1, Some(EDGE), reply(12)));
+        assert_eq!(s.ping.last_error, None, "cleared by a reply");
+        assert!(!s.ping.waiting_for_game);
     }
 
     #[test]
-    fn restart_resets_stats() {
+    fn no_game_is_waiting_not_packet_loss() {
         let mut s = state(Os::Windows, false);
-        s.update(Msg::PingStart);
-        s.update(sample(1, Some(50)));
-        s.update(Msg::PingStop);
-        s.update(Msg::PingStart);
-        assert!(s.ping.stats.is_empty());
-        assert_eq!(s.ping.generation, 2);
+        s.update(tick(1, Some(EDGE), reply(11)));
+        s.update(tick(1, None, PingOutcome::NoGame));
+        assert!(s.ping.waiting_for_game);
+        assert_eq!(s.ping.target, None);
+        assert_eq!(s.ping.stats.samples_ms(), vec![Some(11.0)], "no loss recorded");
     }
 
     #[test]
-    fn stop_stops_the_monitor() {
+    fn a_new_edge_starts_fresh_stats() {
         let mut s = state(Os::Windows, false);
-        s.update(Msg::PingStart);
-        assert_eq!(s.update(Msg::PingStop), vec![Effect::StopPing]);
-        assert!(!s.ping.running && !s.ping.active);
-        assert!(s.update(Msg::PingStop).is_empty(), "already stopped");
-        s.update(sample(1, Some(50)));
-        assert!(s.ping.stats.is_empty(), "samples after stop are ignored");
+        s.update(tick(1, Some(EDGE), reply(11)));
+        s.update(tick(1, Some(OTHER_EDGE), reply(30)));
+        assert_eq!(s.ping.stats.samples_ms(), vec![Some(30.0)]);
+        assert_eq!(s.ping.target, Some(OTHER_EDGE.parse().unwrap()));
+    }
+
+    #[test]
+    fn reconnecting_to_the_same_edge_keeps_history() {
+        let mut s = state(Os::Windows, false);
+        s.update(tick(1, Some(EDGE), reply(11)));
+        s.update(tick(1, None, PingOutcome::NoGame));
+        s.update(tick(1, Some(EDGE), reply(12)));
+        assert_eq!(s.ping.stats.samples_ms(), vec![Some(11.0), Some(12.0)]);
+    }
+
+    #[test]
+    fn stale_or_inactive_samples_are_ignored() {
+        let mut s = state(Os::Windows, false);
+        s.update(tick(0, Some(EDGE), reply(99)));
+        assert!(s.ping.stats.is_empty(), "old generation");
+        s.update(Msg::CloseRequested);
+        s.update(tick(1, Some(EDGE), reply(99)));
+        assert!(s.ping.stats.is_empty(), "monitor stopped");
+    }
+
+    #[test]
+    fn not_pingable_is_reported_without_loss_and_cleared_by_replies() {
+        let mut s = state(Os::Windows, false);
+        s.update(tick(1, Some(EDGE), reply(11)));
+        let aws: std::net::IpAddr = "18.192.74.45".parse().unwrap();
+        s.update(tick(1, None, PingOutcome::NotPingable(vec![aws])));
+        assert_eq!(s.ping.not_pingable, vec![aws]);
+        assert_eq!(s.ping.target, None);
+        assert!(!s.ping.waiting_for_game);
+        assert_eq!(s.ping.stats.samples_ms(), vec![Some(11.0)], "no loss recorded");
+        s.update(tick(1, Some(EDGE), reply(12)));
+        assert!(s.ping.not_pingable.is_empty());
+        s.update(tick(1, None, PingOutcome::NotPingable(vec![aws])));
+        s.update(tick(1, None, PingOutcome::NoGame));
+        assert!(s.ping.not_pingable.is_empty() && s.ping.waiting_for_game);
     }
 
     #[test]
     fn hiding_to_tray_pauses_and_showing_resumes() {
         let mut s = state(Os::Windows, false);
-        s.update(Msg::PingStart);
         assert_eq!(
             s.update(Msg::CloseRequested),
             vec![Effect::HideWindow, Effect::StopPing]
         );
-        assert!(s.ping.running && !s.ping.active, "still wanted, just paused");
+        assert!(!s.ping.active);
         assert_eq!(
             s.update(Msg::ShowDashboard),
-            vec![
-                Effect::ShowWindow,
-                Effect::StartPing {
-                    target: crate::config::DEFAULT_PING_TARGET.into(),
-                    generation: 2
-                }
-            ]
+            vec![Effect::ShowWindow, Effect::StartPing { generation: 2 }]
         );
     }
 
     #[test]
-    fn starting_while_hidden_waits_for_the_window() {
-        let mut s = AppState::new(Os::Windows, false, Config::default(), true).0;
-        assert!(s.update(Msg::PingStart).is_empty());
-        assert!(s.ping.running && !s.ping.active);
+    fn copying_diagnostics_confirms_with_a_notice() {
+        let mut s = state(Os::Windows, false);
+        assert!(s.update(Msg::DiagnosticsCopied).is_empty());
+        assert_eq!(s.notice, Some(Notice::info(COPIED_NOTICE)));
     }
 
     #[test]

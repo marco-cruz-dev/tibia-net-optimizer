@@ -3,6 +3,9 @@
 pub mod adapters;
 pub mod autotuning;
 #[cfg(windows)]
+pub mod conntable;
+pub mod gameconn;
+#[cfg(windows)]
 pub mod icmp;
 #[cfg(windows)]
 pub mod iphelper;

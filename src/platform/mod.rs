@@ -35,6 +35,15 @@ impl Os {
     }
 
     /// What the elevated account is called on this OS.
+    /// Lowercase name, same as the JSON form: `windows`, `linux`, `macos`.
+    pub fn key(&self) -> &'static str {
+        match self {
+            Os::Windows => "windows",
+            Os::Linux => "linux",
+            Os::Macos => "macos",
+        }
+    }
+
     pub fn admin_name(&self) -> &'static str {
         match self {
             Os::Windows => "Administrator",

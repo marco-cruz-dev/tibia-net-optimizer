@@ -1,7 +1,6 @@
 //! View model: everything the window and tray display, derived from state.
 
 use super::state::{AppState, Notice, Route};
-use crate::network::probe::{method_for, parse_target};
 use crate::tweak::{TweakId, TweakState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,12 +72,10 @@ pub struct TrayView {
 /// The "Live Connection Monitor" section.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PingView {
-    pub target_input: String,
-    pub running: bool,
-    /// "Start" or "Stop".
-    pub button: &'static str,
-    /// How the target will be probed, e.g. "ICMP" / "TCP :7172" / "invalid target".
-    pub method: String,
+    /// What the monitor is doing right now.
+    pub status: &'static str,
+    /// The measured address (Tibia's Cloudflare entry point), when known.
+    pub target: Option<String>,
     pub current: String,
     pub average: String,
     pub jitter: String,
@@ -88,9 +85,70 @@ pub struct PingView {
     /// Oldest-first RTTs in ms for the sparkline (`None` = lost).
     pub points: Vec<Option<f64>>,
     pub error: Option<String>,
-    /// Running but paused because the window is hidden.
-    pub paused: bool,
 }
+
+pub const PING_WAITING: &str = "Waiting for Tibia - log in to a game world to measure your connection.";
+pub const PING_MEASURING: &str = "Measuring your connection to Tibia's entry point (Cloudflare).";
+pub const PING_STARTING: &str = "Looking for the Tibia client...";
+pub const PING_NOT_PINGABLE: &str =
+    "Connected, but Tibia's server doesn't answer ping (ICMP is blocked), so latency can't be measured.";
+
+/// A plain-text summary of everything on screen, for "Copy diagnostics".
+pub fn diagnostics(s: &AppState) -> String {
+    let on = |b: bool| if b { "on" } else { "off" };
+    let mut out = vec![
+        format!("Tibia Network Optimizer {}", env!("CARGO_PKG_VERSION")),
+        format!(
+            "Platform: {}   Privileges: {}",
+            s.os.key(),
+            if s.elevated {
+                s.os.admin_name()
+            } else {
+                "standard user"
+            }
+        ),
+        String::new(),
+    ];
+    match &s.report {
+        Some(r) => out.push(r.to_text()),
+        None => out.push("Status: still checking".into()),
+    }
+    out.push(String::new());
+    out.push(format!(
+        "Auto-heal: {}   Minimize to tray: {}   Check interval: {} s",
+        on(s.config.auto_heal),
+        on(s.config.minimize_to_tray),
+        s.config.check_interval_secs
+    ));
+
+    let p = PingView::from_state(s);
+    out.push(String::new());
+    out.push(format!("Connection monitor: {}", p.status));
+    if let Some(t) = &p.target {
+        out.push(format!("  Address: {t}"));
+    }
+    out.push(format!(
+        "  Ping: {}   Average: {}   Jitter: {}   Loss: {}   Samples: {}",
+        p.current,
+        p.average,
+        p.jitter,
+        p.loss,
+        s.ping.stats.len()
+    ));
+    if let Some(e) = &p.error {
+        out.push(format!("  Last probe error: {e}"));
+    }
+    if let Some(n) = &s.notice {
+        out.push(String::new());
+        out.push(format!("Notice: {}", n.text));
+    }
+    out.join("\n")
+}
+/// Shown as a tooltip: what is (and isn't) measured.
+pub const PING_EXPLAINER: &str = "Tibia routes game traffic through Cloudflare. This pings the Cloudflare \
+     server your client is connected to (ICMP only, never the game port). That is the part of the path your \
+     ISP and Wi-Fi affect, where lag spikes and jitter come from. Cloudflare's link on to the game world \
+     can't be measured from outside.";
 
 /// Jitter is what makes steps stutter: under 5 ms is smooth, 5–15 ms is
 /// noticeable, and above that it hurts.
@@ -123,15 +181,30 @@ impl PingView {
         let p = &s.ping;
         let stats = &p.stats;
         let ms = |v: Option<f64>| v.map_or_else(|| DASH.to_string(), |x| format!("{x:.0} ms"));
-        let method = parse_target(&p.target_input)
-            .map(|t| method_for(&t, s.os).label())
-            .unwrap_or_else(|_| "invalid target".into());
         let jitter = stats.jitter_ms();
+        let status = if p.waiting_for_game {
+            PING_WAITING
+        } else if !p.not_pingable.is_empty() {
+            PING_NOT_PINGABLE
+        } else if p.target.is_some() {
+            PING_MEASURING
+        } else {
+            PING_STARTING
+        };
+        let target = match p.target {
+            Some(t) => Some(t.to_string()),
+            None if !p.not_pingable.is_empty() => Some(
+                p.not_pingable
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+            None => None,
+        };
         PingView {
-            target_input: p.target_input.clone(),
-            running: p.running,
-            button: if p.running { "Stop" } else { "Start" },
-            method,
+            status,
+            target,
             current: ms(stats.current_ms()),
             average: ms(stats.average_ms()),
             jitter: jitter.map_or_else(|| DASH.to_string(), |j| format!("{j:.1} ms")),
@@ -144,7 +217,6 @@ impl PingView {
             loss_tone: loss_tone(stats.packet_loss_pct(), !stats.is_empty()),
             points: stats.samples_ms(),
             error: p.last_error.clone(),
-            paused: p.running && !p.active,
         }
     }
 }
@@ -515,27 +587,31 @@ mod tests {
         assert_eq!(hint(Os::Windows, false, false), None, "off: nothing to explain");
     }
 
-    // --- latency monitor ---------------------------------------------------
+    // --- connection monitor ------------------------------------------------
 
-    use crate::app::state::{Msg, PingSample};
+    use crate::app::state::{Msg, PingOutcome, PingSample};
+
+    const EDGE: &str = "2606:4700:90:0:4b6e:7f99:a2f2:fd80";
 
     fn feed(s: &mut AppState, samples: &[Option<u64>]) {
         for ms in samples {
             s.update(Msg::Ping(PingSample {
                 generation: s.ping.generation,
-                rtt: ms.map(std::time::Duration::from_millis),
-                error: ms.is_none().then(|| "timed out".to_string()),
+                target: Some(EDGE.parse().unwrap()),
+                outcome: match ms {
+                    Some(ms) => PingOutcome::Reply(std::time::Duration::from_millis(*ms)),
+                    None => PingOutcome::Lost("timed out".into()),
+                },
             }));
         }
     }
 
     #[test]
-    fn idle_monitor_shows_dashes_and_start() {
+    fn before_the_first_tick_it_is_looking_for_the_client() {
         let s = AppState::new(Os::Windows, false, Config::default(), false).0;
         let v = PingView::from_state(&s);
-        assert_eq!(v.button, "Start");
-        assert!(!v.running && !v.paused);
-        assert_eq!(v.method, "ICMP");
+        assert_eq!(v.status, PING_STARTING);
+        assert_eq!(v.target, None);
         assert_eq!(
             (
                 v.current.as_str(),
@@ -550,36 +626,84 @@ mod tests {
     }
 
     #[test]
-    fn running_monitor_formats_stats() {
+    fn waiting_when_tibia_is_not_connected() {
         let mut s = AppState::new(Os::Windows, false, Config::default(), false).0;
-        s.update(Msg::PingStart);
-        feed(&mut s, &[Some(50), Some(54), None, Some(52)]);
+        s.update(Msg::Ping(PingSample {
+            generation: s.ping.generation,
+            target: None,
+            outcome: PingOutcome::NoGame,
+        }));
         let v = PingView::from_state(&s);
-        assert_eq!(v.button, "Stop");
-        assert_eq!(v.current, "52 ms");
-        assert_eq!(v.average, "52 ms");
-        assert_eq!(v.jitter, "3.0 ms"); // |54-50| + |52-54| = 6 / 2
+        assert_eq!(v.status, PING_WAITING);
+        assert_eq!(v.target, None);
+    }
+
+    #[test]
+    fn measuring_formats_stats_and_shows_the_edge() {
+        let mut s = AppState::new(Os::Windows, false, Config::default(), false).0;
+        feed(&mut s, &[Some(10), Some(14), None, Some(12)]);
+        let v = PingView::from_state(&s);
+        assert_eq!(v.status, PING_MEASURING);
+        assert_eq!(v.target.as_deref(), Some(EDGE));
+        assert_eq!(v.current, "12 ms");
+        assert_eq!(v.average, "12 ms");
+        assert_eq!(v.jitter, "3.0 ms"); // |14-10| + |12-14| = 6 / 2
         assert_eq!(v.loss, "25%");
-        assert_eq!(v.points, vec![Some(50.0), Some(54.0), None, Some(52.0)]);
+        assert_eq!(v.points, vec![Some(10.0), Some(14.0), None, Some(12.0)]);
         assert_eq!(v.error, None, "last probe succeeded");
     }
 
     #[test]
-    fn method_follows_target_and_os() {
-        let mut s = AppState::new(Os::Linux, false, Config::default(), false).0;
-        assert_eq!(PingView::from_state(&s).method, "TCP :443");
-        s.update(Msg::PingTargetEdited("1.2.3.4:7172".into()));
-        assert_eq!(PingView::from_state(&s).method, "TCP :7172");
-        s.update(Msg::PingTargetEdited("bad:port".into()));
-        assert_eq!(PingView::from_state(&s).method, "invalid target");
+    fn not_pingable_status_lists_the_addresses() {
+        let mut s = AppState::new(Os::Windows, false, Config::default(), false).0;
+        s.update(Msg::Ping(PingSample {
+            generation: s.ping.generation,
+            target: None,
+            outcome: PingOutcome::NotPingable(vec!["18.192.74.45".parse().unwrap()]),
+        }));
+        let v = PingView::from_state(&s);
+        assert_eq!(v.status, PING_NOT_PINGABLE);
+        assert_eq!(v.target.as_deref(), Some("18.192.74.45"));
     }
 
     #[test]
-    fn paused_while_hidden() {
-        let mut s = AppState::new(Os::Windows, false, Config::default(), false).0;
-        s.update(Msg::PingStart);
-        s.update(Msg::CloseRequested);
-        assert!(PingView::from_state(&s).paused);
+    fn diagnostics_include_status_settings_and_monitor() {
+        let mut s = with_report(Os::Windows, false, vec![nagle(TweakState::NotOptimized)], false);
+        s.config.auto_heal = true;
+        feed(&mut s, &[Some(11), None]);
+        s.notice = Some(Notice::error("Auto-heal failed: timed out"));
+        let d = diagnostics(&s);
+        for expected in [
+            "Tibia Network Optimizer",
+            env!("CARGO_PKG_VERSION"),
+            "Platform: windows",
+            "Privileges: standard user",
+            "Nagle / delayed ACK",
+            "Ethernet",
+            "Auto-heal: on",
+            "Minimize to tray: on",
+            PING_MEASURING,
+            EDGE,
+            "Loss: 50%",
+            "Last probe error: timed out",
+            "Notice: Auto-heal failed: timed out",
+        ] {
+            assert!(d.contains(expected), "missing {expected:?} in:\n{d}");
+        }
+    }
+
+    #[test]
+    fn diagnostics_work_before_the_first_status() {
+        let s = AppState::new(Os::Linux, true, Config::default(), false).0;
+        let d = diagnostics(&s);
+        assert!(d.contains("Status: still checking"), "{d}");
+        assert!(d.contains("Privileges: root"), "{d}");
+    }
+
+    #[test]
+    fn explainer_says_icmp_only_and_cloudflare() {
+        assert!(PING_EXPLAINER.contains("ICMP only"));
+        assert!(PING_EXPLAINER.contains("Cloudflare"));
     }
 
     #[test]

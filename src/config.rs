@@ -8,10 +8,8 @@ use serde::{Deserialize, Serialize};
 use crate::platform::Os;
 use crate::Result;
 
-pub const DEFAULT_PING_TARGET: &str = crate::network::probe::DEFAULT_TARGET;
-/// The original spec's default; it has no DNS record, so saved configs are migrated.
-const LEGACY_PING_TARGET: &str = "secura.tibia.com";
-
+/// Settings. Unknown fields from older versions (e.g. the removed
+/// `ping_target`) are ignored on load.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -20,8 +18,6 @@ pub struct Config {
     pub auto_heal: bool,
     /// Clicking the window's X hides it to the tray instead of quitting.
     pub minimize_to_tray: bool,
-    /// Host used by the latency monitor.
-    pub ping_target: String,
     /// Background drift-check interval.
     pub check_interval_secs: u64,
     /// Unix seconds of the last auto-tuning change made by this app; used to
@@ -34,7 +30,6 @@ impl Default for Config {
         Self {
             auto_heal: false,
             minimize_to_tray: true,
-            ping_target: DEFAULT_PING_TARGET.to_string(),
             check_interval_secs: 60,
             autotuning_changed_at: None,
         }
@@ -59,16 +54,6 @@ impl Config {
             .ok()
             .and_then(|s| serde_json::from_str::<Config>(&s).ok())
             .unwrap_or_default()
-            .migrate()
-    }
-
-    /// Upgrades values from older versions.
-    fn migrate(mut self) -> Config {
-        let target = self.ping_target.trim();
-        if target.is_empty() || target == LEGACY_PING_TARGET {
-            self.ping_target = DEFAULT_PING_TARGET.to_string();
-        }
-        self
     }
 
     /// Writes settings, creating the parent directory if needed.
@@ -296,18 +281,18 @@ mod tests {
     }
 
     #[test]
-    fn default_ping_target_is_the_frankfurt_endpoint() {
-        assert_eq!(Config::default().ping_target, "fra-de-ping.vultr.com");
-    }
-
-    #[test]
-    fn legacy_ping_target_is_migrated_and_custom_ones_kept() {
+    fn configs_from_older_versions_still_load() {
+        // `ping_target` existed until the monitor switched to auto-detection.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.json");
-        fs::write(&path, r#"{ "ping_target": "secura.tibia.com" }"#).unwrap();
-        assert_eq!(Config::load(&path).ping_target, DEFAULT_PING_TARGET);
-        fs::write(&path, r#"{ "ping_target": "1.2.3.4:7172" }"#).unwrap();
-        assert_eq!(Config::load(&path).ping_target, "1.2.3.4:7172");
+        fs::write(
+            &path,
+            r#"{ "auto_heal": true, "ping_target": "fra-de-ping.vultr.com" }"#,
+        )
+        .unwrap();
+        let c = Config::load(&path);
+        assert!(c.auto_heal, "known fields kept");
+        assert_eq!(c.check_interval_secs, 60);
     }
 
     #[test]
@@ -315,7 +300,6 @@ mod tests {
         let c = Config::default();
         assert!(!c.auto_heal);
         assert!(c.minimize_to_tray);
-        assert_eq!(c.ping_target, DEFAULT_PING_TARGET);
         assert_eq!(c.check_interval_secs, 60);
         assert_eq!(c.autotuning_changed_at, None);
     }
@@ -327,7 +311,6 @@ mod tests {
         let c = Config {
             auto_heal: true,
             minimize_to_tray: false,
-            ping_target: "1.1.1.1".into(),
             check_interval_secs: 30,
             autotuning_changed_at: Some(1_764_000_000),
         };
@@ -356,6 +339,6 @@ mod tests {
         fs::write(&path, r#"{ "auto_heal": true }"#).unwrap();
         let c = Config::load(&path);
         assert!(c.auto_heal);
-        assert_eq!(c.ping_target, DEFAULT_PING_TARGET);
+        assert!(c.minimize_to_tray);
     }
 }

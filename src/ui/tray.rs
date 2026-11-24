@@ -7,7 +7,7 @@ use tray_icon::menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 
 use crate::actions::Action;
-use crate::app::icon::{circle_rgba, tone_rgb, TRAY_SIZE};
+use crate::app::icon::{tray_icon_rgba, TRAY_SIZE};
 use crate::app::state::Msg;
 use crate::app::view::{Tone, TrayView};
 
@@ -18,7 +18,7 @@ pub struct Tray {
 }
 
 fn make_icon(tone: Tone) -> Result<Icon, String> {
-    Icon::from_rgba(circle_rgba(TRAY_SIZE, tone_rgb(tone)), TRAY_SIZE, TRAY_SIZE).map_err(|e| e.to_string())
+    Icon::from_rgba(tray_icon_rgba(TRAY_SIZE, tone), TRAY_SIZE, TRAY_SIZE).map_err(|e| e.to_string())
 }
 
 impl Tray {

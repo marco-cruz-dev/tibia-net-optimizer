@@ -57,7 +57,8 @@ manual QA checklist.
 | Linux | `sudo tibia-net-optimizer apply` → `/etc/sysctl.d/99-tibia-net-optimizer.conf` exists, `ip route show default` shows `quickack 1`. Reconnect Wi-Fi → quickack is still on (NetworkManager hook). Reboot → still optimized. `sudo ... revert` → original values restored and files removed. `sudo ... startup on/off` → `systemctl is-enabled tibia-net-optimizer`. |
 | macOS | `sudo tibia-net-optimizer apply` → `sysctl net.inet.tcp.delayed_ack` = 0 and the plist exists in `/Library/LaunchDaemons`. Reboot → still 0. `revert` → `delayed_ack` back to 3 and plist removed. `startup on/off`. |
 | Auto-heal (Windows) | `startup on --elevate` and log in again (the app starts elevated in the tray). Tick "Auto-heal". In an admin terminal: `netsh int tcp set global autotuninglevel=normal`. Within 60 s: toast "...re-applied: TCP auto-tuning", the tray turns green, and `status` shows disabled. Click Revert in the dashboard → auto-heal unticks with an explanation, and nothing gets re-applied. |
-| Latency monitor | Dashboard → Live Connection Monitor → **Start**: within about 4 s, Ping/Average show values (≈50 ms from Portugal), Jitter/Loss turn coloured and the sparkline draws. Hide to the tray, then reopen: probing pauses, then resumes. Enter `1.2.3.4:abc` → "Invalid ping target". Enter `fra-de-ping.vultr.com:443` → method shows "TCP :443". |
+| Copy | Select any text in the dashboard → Ctrl+C pastes elsewhere. **Copy diagnostics** → "Diagnostics copied to the clipboard."; paste shows the full summary. |
+| Connection monitor | Open the dashboard without Tibia → "Waiting for Tibia". Log in to a world → within ~10 s the status changes to "Measuring…" with an entry point `2606:4700:…` (Cloudflare), Ping ≈ 11 ms, and the sparkline draws. Change world or relog → it follows. Log out → back to waiting, with no loss counted. Hide to the tray, then reopen → it resumes. Or run `$env:TNO_PING_IP="<edge>"; cargo test --test system_smoke -- --ignored pings_ip_from_env --nocapture`. |
 | GUI (all) | Launch with no args → dashboard shows real status and a coloured tray icon. Left-click the tray → window shows. Right-click → menu: Status, Open Dashboard, Apply, Revert, separator, Quit. Close the window → hides to the tray (with "Minimize to tray" on) or quits (off). Toggle a card / Optimize Now / Revert: Windows admin → in-process; Windows user → "Restart as Administrator" relaunches elevated; Linux/macOS user → password prompt (pkexec / macOS dialog). `--minimized` → starts in the tray only. |
 
 ## Sprint 3 — Cross-platform core: Linux & macOS ✅ (spike pending)
@@ -210,47 +211,45 @@ Known limitations / follow-ups:
 - The end-to-end heal (an elevated GUI with real settings drifting) is on the
   manual QA checklist.
 
-## Sprint 6 — Live latency monitor ✅ (Start/Stop click path: manual QA)
+## Sprint 6 — Live connection monitor ✅
 
-**Default-target check (done during planning, 2026-11-24):** `secura.tibia.com`
-has **no DNS record**; Tibia game-world IPs are handed out by the login
-server. `www.tibia.com` is Cloudflare anycast, so it measures the nearest
-edge, not Frankfurt. The new default is **`fra-de-ping.vultr.com`**, a public
-Frankfurt ping endpoint that answers ICMP and TCP 443 (≈52 ms from the dev
-machine in Portugal). Saved configs holding the old default are migrated.
+The monitor measures **the user's real Tibia connection**. It finds the
+running client's game connection and pings it with ICMP. There is no target
+box, no Start button and no third-party test server.
 
-Done test-first (29 tests run red, then green). The suite grew from 218 to
-244 unit tests, plus 3 new smoke tests.
+**Finding: how Secura traffic really flows (measured 2026-11-24, while playing):**
+- The Tibia client's game connection goes to `[2606:4700:90:0:4b6e:7f99:a2f2:fd80]:7171`. ARIN RDAP says that address belongs to **Cloudflare, Inc.**, so CipSoft fronts its game worlds with Cloudflare's TCP proxy (Spectrum). It's anycast: the user reaches the **Lisbon (LIS)** edge, according to `tibia.com/cdn-cgi/trace`. Game-world IPs aren't public (`secura.tibia.com` has no DNS record).
+- RTT to that edge is **11 ms** (ICMPv6, 0% loss). The rest of the way to the Frankfurt game world runs on Cloudflare's backbone. A public Frankfurt host (52 ms over the ISP's own route) measures a path the game doesn't use, so the first iteration's Frankfurt default was dropped.
+- **Update, same day:** during a later session the client held **two** game-port connections at once: the Cloudflare edge (answers ICMP, 11 ms) **and** `18.192.74.45:7171`, an AWS EC2 host in Frankfurt (`eu-central-1`, per RDAP and reverse DNS) that **blocks ICMP**. Which one carries which traffic isn't visible from outside. The first detector took the first connection; Windows lists IPv4 first, so it switched to the AWS host and every probe timed out ("os error 11010" = `IP_REQ_TIMED_OUT`). Fixed: all candidates are kept and the first one that answers ICMP is measured.
+- **Consequences:**
+  1. The client's TCP session (and so Nagle, delayed ACK and receive window) is with the nearby Cloudflare edge. The local tweaks still matter: Nagle/delayed-ACK delays happen on the user's machine regardless of RTT. Auto-tuning matters less on an 11 ms link.
+  2. The part of the path the user's ISP and Wi-Fi affect is user → Cloudflare edge, which is exactly what the monitor measures.
+  3. Probe with **ICMP only**. Each TCP connect to :7171 is forwarded by Spectrum to CipSoft's game server, so TCP probing every 2 s would hammer the origin.
+  4. The edge→world leg can't be measured from outside (explained in the UI tooltip).
+
+Done test-first in two iterations. The first used a fixed target; the
+second (S6-6) switched to auto-detection. The suite went from 218 to 251 unit
+tests. 3 smoke tests run on CI, plus 2 that only run when Tibia is connected
+or an IP is supplied.
 
 | ID | Story | Status |
 |----|-------|--------|
-| S6-1 | **Target parsing and probe method.** | ✅ `network/probe.rs`: `host`, `host:port`, `[v6]:port`, bare IPv6, with clear errors. A port means TCP connect; no port means ICMP on Windows and TCP 443 on Linux/macOS. |
-| S6-2 | **Probers.** | ✅ TCP connect (all OSes; tested against a local listener, including refusal). ICMP via `IcmpSendEcho` (`network/icmp.rs`, no admin needed). Smoke-tested on loopback and against Frankfurt: **52 ms** from the dev machine. |
-| S6-3 | **Monitor thread.** | ✅ `app/ping.rs`: a probe every 2 s with a 1 s timeout. Stopping never blocks the UI (the thread isn't joined), and late samples carry an old *generation* that the reducer ignores. |
-| S6-4 | **State and view.** | ✅ Start validates and saves the target. Probing runs only **while running and the window is visible**: hiding to the tray pauses, showing resumes with a new generation. Restart clears the stats. Current/average in ms, jitter to 0.1 ms (green < 5, amber < 15, red), loss % (green 0, amber ≤ 2, red). |
-| S6-5 | **UI.** | ✅ A "Live Connection Monitor" section with a target box, method label, Start/Stop, a stats grid and a sparkline painted with egui (no plot dependency; lost probes show as red ticks). Rendering checked in a screenshot. ⏳ The **Start click path wasn't exercised at runtime**: the test click was intercepted by another app on top, so it's on the manual QA list. |
-| S6-6 | *(follow-up)* **Monitor the real game path**: auto-detect the running Tibia client's game connection (`GetExtendedTcpTable` with owning PID on Windows; `/proc/net/tcp` on Linux) and probe it with **ICMPv6/ICMP** (`Icmp6SendEcho2` / `IcmpSendEcho`), never repeated TCP connects. | Next candidate. See the findings below. |
-| S6-7 | *(follow-up)* **ICMP blocked**: some networks (for example GitHub's Windows runners) drop ICMP, so the monitor would show 100% loss. Detect repeated ICMP failure and suggest a `host:port` TCP target, rather than silently mixing methods (which would corrupt jitter). | Small. |
+| S6-1 | **Find the game connection** (`network/gameconn.rs`). | ✅ Pure selection: the process `client`/`client.exe` (not `client_launcher`) on port 7171/7172; the website (443) and other apps are ignored. Tested with the connections measured while playing. Sources: Windows `GetExtendedTcpTable` (IPv4 + IPv6, owning PIDs) plus Toolhelp process names, without opening any process handle, so BattlEye-protected processes are fine (`network/conntable.rs`; output matched `Get-NetTCPConnection` exactly). Linux `/proc/net/tcp{,6}` with the hex-address parser and socket-inode ownership. macOS `lsof -Fpcn`. The parsers are unit-tested. |
+| S6-2 | **ICMP probers** (`network/probe.rs`, `network/icmp.rs`). | ✅ Windows: `IcmpSendEcho` (IPv4) and `Icmp6SendEcho2` (IPv6), no admin needed. Verified against the Secura edge: **11–12 ms**. Linux/macOS: the system `ping`/`ping6` binary (already privileged), with `LC_ALL=C` and parsed output. Command construction and parsing are unit-tested. |
+| S6-3 | **Monitor thread** (`app/ping.rs`). | ✅ `GameProbe` re-detects every 5 ticks (≈10 s, following relogs and world changes) and after 3 losses in a row. A tick every 2 s with a 1 s timeout. Stopping never blocks the UI, and late samples carry an old generation that is ignored. |
+| S6-4 | **State and view.** | ✅ Runs automatically while the dashboard is visible (hiding to the tray stops it). "No game" is *waiting*, not packet loss. A new edge resets the stats; reconnecting to the same edge keeps the history. Status: looking → waiting for Tibia → measuring, with the edge address shown. Jitter to 0.1 ms (green < 5, amber < 15, red), loss % (green 0, amber ≤ 2, red). |
+| S6-5 | **UI.** | ✅ Status line, entry-point address, stats grid, an egui-painted sparkline, and an explainer tooltip (ICMP only, Cloudflare, what can't be measured). Verified at runtime without input: the monitor auto-started and moved to "Waiting for Tibia". Captured with PrintWindow. |
+| S6-7 | **Multiple game connections and ICMP-blocking hosts** (bug found in use: "os error 11010"). | ✅ Detection returns *all* game-port connections. `GameProbe` keeps the current target if it's still present, otherwise uses the first that answers ICMP, and switches after 3 losses. If none answer, it shows "server doesn't answer ping" (not packet loss, and never a TCP fallback). Windows `IP_*` codes are shown as words ("timed out"). Verified live on Secura: the AWS host timed out, and the Cloudflare edge was picked at 11–12 ms. |
+| S6-9 | **Recognisable app and tray icon** (user request; replaces the plain grey/coloured dot). | ✅ An original mark (not Tibia/CipSoft artwork): a heater shield (RPG cue) with a white ping pulse (network), on a blue `#2563EB` → teal `#0F766E` gradient with a dark navy outline. The tray uses the same shield plus a **status dot** (green/red/amber/grey) with a dark ring, so it's recognisable *and* shows status. Drawn in code with 1 px anti-aliasing (`app/icon.rs`; signed distances to the shield polygon and pulse polyline), so there are no image files. Unit-tested for silhouette, gradient, pulse, dot colours and anti-aliasing; reviewed visually on light and dark backgrounds at 256/64/32/16 px (`cargo test --lib app::icon -- --ignored` writes previews). |
+| S6-8 | **Copy text** (user request). | ✅ eframe's clipboard support enabled (it was off in the slim build, so Ctrl+C did nothing), all labels selectable, and a **Copy diagnostics** button that copies a plain-text summary: version, platform, privileges, every setting, automation, monitor status, address, stats, last error and notice. The summary is unit-tested. |
 
-**Finding: how Secura traffic really flows (measured 2026-11-24, while playing):**
-- The Tibia client's game connection goes to `[2606:4700:90:0:4b6e:7f99:a2f2:fd80]:7171`. ARIN RDAP says that address belongs to **Cloudflare, Inc.**, so CipSoft fronts its game worlds with Cloudflare's TCP proxy (Spectrum). It's anycast: the user reaches the **Lisbon (LIS)** edge, according to `tibia.com/cdn-cgi/trace`.
-- RTT to that edge is **11 ms** (ICMPv6, 0% loss) and about 12 ms (TCP handshake on 7171). The rest of the way to the Frankfurt game world runs on Cloudflare's backbone. A public Frankfurt host measures 52 ms over the ISP's own route, a path the game no longer uses.
-- **Consequences:**
-  1. The client's TCP session (and so Nagle, delayed ACK and receive window) is with the nearby Cloudflare edge, not Frankfurt. The local tweaks still matter: Nagle/delayed-ACK delays happen on the user's machine regardless of RTT. Auto-tuning matters less on an 11 ms link.
-  2. The part of the path the user's ISP and Wi-Fi affect is user → Cloudflare edge. That is what the monitor should measure for jitter and loss.
-  3. Probe the proxy with **ICMP only**. Each TCP connect to :7171 is forwarded by Spectrum to CipSoft's game server, so a 2 s TCP probe would hammer the origin and could look abusive.
-  4. The edge→world leg can't be measured from outside.
-
-Known limitations / follow-ups:
-- ICMP on Linux/macOS (unprivileged datagram sockets) isn't implemented;
-  those platforms probe TCP 443, which measures the same path plus a
-  negligible handshake cost.
-- `IcmpSendEcho` has 1 ms resolution, which is fine for jitter at Tibia's
-  scale. A `host:port` target gives TCP timing with microsecond resolution.
+Known limitations:
+- `IcmpSendEcho` has 1 ms resolution, which is fine for jitter at this scale.
+- Linux needs `ping` (iputils) and macOS `lsof`. Both are present by default.
 
 ## Sprint 7 — Release ⏳
 
-- Windows `build.rs` + `winres`: an `asInvoker` manifest, so the app always opens read-only and elevates on request, plus the app icon. Use the GUI subsystem so no console flashes on start, while keeping CLI output when run from a terminal.
+- Windows `build.rs` + `winres`: an `asInvoker` manifest, so the app always opens read-only and elevates on request, plus the app icon. Generate the `.ico` (16/32/48/256) at build time from the same `app/icon.rs` rasterizer, so Explorer, the taskbar and the window all show the same shield. Use the GUI subsystem so no console flashes on start, while keeping CLI output when run from a terminal.
 - The release profile is already tuned for size (`opt-level = "z"`, LTO, strip).
 - Release builds for Windows (`.exe`), Linux (tarball, optional `.deb`) and macOS (universal binary / `.app`).
 - Size check, manual QA checklist per OS, GitHub release artifacts.
