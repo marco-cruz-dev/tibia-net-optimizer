@@ -98,14 +98,16 @@ fn icmp_echo_to_loopback() {
     assert!(rtt < Duration::from_secs(1));
 }
 
-/// Needs internet access: probes the default Frankfurt target.
+/// Needs internet access: probes the default Frankfurt target over TCP 443.
+/// (Not ICMP: GitHub's Windows runners block outbound ICMP. ICMP itself is
+/// covered by `icmp_echo_to_loopback`, and was checked manually: 52 ms.)
 #[test]
 #[ignore]
 fn probes_the_default_target() {
     use tibia_net_optimizer::network::probe::{parse_target, probe_once, DEFAULT_TARGET};
-    let target = parse_target(DEFAULT_TARGET).unwrap();
-    let rtt = probe_once(&target, Duration::from_secs(2)).expect("default target should answer");
-    println!("{DEFAULT_TARGET}: {rtt:?}");
+    let target = parse_target(&format!("{DEFAULT_TARGET}:443")).unwrap();
+    let rtt = probe_once(&target, Duration::from_secs(3)).expect("default target should answer");
+    println!("{DEFAULT_TARGET}:443: {rtt:?}");
 }
 
 #[test]

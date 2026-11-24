@@ -229,7 +229,17 @@ Done test-first (29 tests run red, then green). The suite grew from 218 to
 | S6-3 | **Monitor thread.** | ✅ `app/ping.rs`: a probe every 2 s with a 1 s timeout. Stopping never blocks the UI (the thread isn't joined), and late samples carry an old *generation* that the reducer ignores. |
 | S6-4 | **State and view.** | ✅ Start validates and saves the target. Probing runs only **while running and the window is visible**: hiding to the tray pauses, showing resumes with a new generation. Restart clears the stats. Current/average in ms, jitter to 0.1 ms (green < 5, amber < 15, red), loss % (green 0, amber ≤ 2, red). |
 | S6-5 | **UI.** | ✅ A "Live Connection Monitor" section with a target box, method label, Start/Stop, a stats grid and a sparkline painted with egui (no plot dependency; lost probes show as red ticks). Rendering checked in a screenshot. ⏳ The **Start click path wasn't exercised at runtime**: the test click was intercepted by another app on top, so it's on the manual QA list. |
-| S6-6 | *(follow-up)* **Auto-detect the game server** from the running Tibia client's TCP connection (`GetExtendedTcpTable` with owning PID on Windows; `/proc/net/tcp` on Linux). | Later sprint. |
+| S6-6 | *(follow-up)* **Monitor the real game path**: auto-detect the running Tibia client's game connection (`GetExtendedTcpTable` with owning PID on Windows; `/proc/net/tcp` on Linux) and probe it with **ICMPv6/ICMP** (`Icmp6SendEcho2` / `IcmpSendEcho`), never repeated TCP connects. | Next candidate. See the findings below. |
+| S6-7 | *(follow-up)* **ICMP blocked**: some networks (for example GitHub's Windows runners) drop ICMP, so the monitor would show 100% loss. Detect repeated ICMP failure and suggest a `host:port` TCP target, rather than silently mixing methods (which would corrupt jitter). | Small. |
+
+**Finding: how Secura traffic really flows (measured 2026-11-24, while playing):**
+- The Tibia client's game connection goes to `[2606:4700:90:0:4b6e:7f99:a2f2:fd80]:7171`. ARIN RDAP says that address belongs to **Cloudflare, Inc.**, so CipSoft fronts its game worlds with Cloudflare's TCP proxy (Spectrum). It's anycast: the user reaches the **Lisbon (LIS)** edge, according to `tibia.com/cdn-cgi/trace`.
+- RTT to that edge is **11 ms** (ICMPv6, 0% loss) and about 12 ms (TCP handshake on 7171). The rest of the way to the Frankfurt game world runs on Cloudflare's backbone. A public Frankfurt host measures 52 ms over the ISP's own route, a path the game no longer uses.
+- **Consequences:**
+  1. The client's TCP session (and so Nagle, delayed ACK and receive window) is with the nearby Cloudflare edge, not Frankfurt. The local tweaks still matter: Nagle/delayed-ACK delays happen on the user's machine regardless of RTT. Auto-tuning matters less on an 11 ms link.
+  2. The part of the path the user's ISP and Wi-Fi affect is user → Cloudflare edge. That is what the monitor should measure for jitter and loss.
+  3. Probe the proxy with **ICMP only**. Each TCP connect to :7171 is forwarded by Spectrum to CipSoft's game server, so a 2 s TCP probe would hammer the origin and could look abusive.
+  4. The edge→world leg can't be measured from outside.
 
 Known limitations / follow-ups:
 - ICMP on Linux/macOS (unprivileged datagram sockets) isn't implemented;
