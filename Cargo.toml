@@ -11,9 +11,7 @@ repository = "https://github.com/marco-cruz-dev/tibia-net-optimizer"
 # command line (`tno`, src/bin/tno.rs). `cargo run` starts the dashboard.
 default-run = "tibia-net-optimizer"
 
-# Sprint 1 keeps dependencies minimal: only what the domain core + Windows
-# adapters need. GUI/tray crates (eframe, egui, tray-icon, image) and the
-# `windows` crate are added in the sprints that introduce those features.
+# Dependencies are kept minimal; release builds are tuned for size.
 [features]
 # The tray + dashboard GUI. Disable for a CLI-only build:
 #   cargo build --no-default-features

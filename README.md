@@ -83,6 +83,9 @@ Options:
   --elevate                Relaunch with admin rights (UAC / sudo / pkexec) if needed
   --pause                  Wait for Enter before exiting
   -h, --help               Show this help
+
+Setting IDs (see `status --json`): win_auto_tuning, win_nagle, linux_moderate_rcvbuf,
+  linux_autocorking, linux_quick_ack, mac_auto_rcvbuf, mac_delayed_ack
 ```
 
 ```powershell
@@ -128,21 +131,23 @@ state, summary, details[] }], startup, reboot_recommended }`.
 cargo test                                   # fast unit tests (fakes, no OS changes)
 cargo test -- --ignored --nocapture          # read-only smoke tests against this machine
 cargo clippy --all-targets -- -D warnings    # lint
+cargo clippy --all-targets --no-default-features -- -D warnings   # lint the CLI-only build
 cargo fmt --all                              # format
 cargo run                                    # dashboard + tray
 cargo run --bin tno -- status                # CLI status
 
 # Lint other OSes without leaving yours (needs `rustup target add ...`):
+cargo clippy --all-targets --target x86_64-pc-windows-msvc -- -D warnings
 cargo clippy --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
 cargo clippy --all-targets --target aarch64-apple-darwin -- -D warnings
 ```
 
-CI runs fmt, clippy, the unit tests and the smoke tests on **Windows, Ubuntu
+CI runs fmt, both clippy passes, the unit tests and the smoke tests on **Windows, Ubuntu
 and macOS** ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
 
 ### TDD workflow
 
-This project uses short, agile sprints and test-driven development:
+This project works one GitHub issue at a time, with test-driven development:
 
 1. Pick the next issue from the [project board](https://github.com/users/marco-cruz-dev/projects/2) and move it to *In progress*.
 2. **Red:** write the tests against a stub (`todo!()`) and watch them fail.
@@ -154,7 +159,7 @@ This project uses short, agile sprints and test-driven development:
 
 1. The behaviour is specified by a failing test first (red → green → refactor).
 2. OS side effects go through a port (`CommandRunner`, `InterfaceRegistry`, …) with a fake for tests.
-3. `cargo fmt`, `cargo clippy --all-targets -- -D warnings` and `cargo test` all pass.
+3. `cargo fmt`, both clippy passes (default and `--no-default-features`, for all three targets) and `cargo test` all pass.
 4. Real adapters have an `#[ignore]`d **read-only** smoke test. Tests never modify system settings.
 5. The README is updated. Changes that can't be tested automatically are added to the
    [manual QA checklist](https://github.com/marco-cruz-dev/tibia-net-optimizer/issues/55).
@@ -204,9 +209,10 @@ src/
 │   ├── sysctl.rs        SysctlTweak (Linux/macOS), records originals
 │   └── quickack.rs      Linux per-route quick ACK
 ├── platform/            Per-OS assembly: windows.rs, linux.rs, macos.rs
-├── network/             Windows networking: netsh, registry, IP Helper, adapters; ping stats
+├── network/             Windows networking (netsh, registry, IP Helper, adapters); game-connection
+│                        lookup, ICMP probes and ping stats for the connection monitor
 ├── unix/                sysctl port, persistence (sysctl.d / plist), ip route,
-│                        systemd/launchd, sudo/pkexec/osascript
+│                        systemd/launchd, sudo/pkexec/osascript, the real user behind sudo
 └── system/              Command runner, elevation, console, encoding, boot time, Task Scheduler,
                          notifications, Windows manifest
 tests/
