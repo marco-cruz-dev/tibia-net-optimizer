@@ -1,15 +1,16 @@
-//! CLI entry point: a thin, platform-agnostic shell over the tested library.
-//! The tray + egui GUI becomes the default mode in Sprint 4.
+//! Entry point: the dashboard/tray app by default, or a CLI command.
+//! A thin shell over the tested library.
 
 use std::process::ExitCode;
 use std::time::SystemTime;
 
+use tibia_net_optimizer::actions::{run_tweaks, Outcome};
 use tibia_net_optimizer::cli::{self, Cli, Command, StartupAction};
 use tibia_net_optimizer::config::Config;
 use tibia_net_optimizer::platform::{self, Os, Platform};
-use tibia_net_optimizer::report::{StatusInputs, StatusReport};
+use tibia_net_optimizer::report;
 use tibia_net_optimizer::system::{boot, elevation};
-use tibia_net_optimizer::tweak::TweakState;
+use tibia_net_optimizer::tweak::TweakId;
 use tibia_net_optimizer::{Error, Result};
 
 fn main() -> ExitCode {
@@ -21,12 +22,40 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    if let Command::Gui { minimized } = cli.command {
+        return gui(minimized);
+    }
     let code = run(&cli, &raw);
     if cli.pause {
         println!("\nPress Enter to close...");
         let _ = std::io::stdin().read_line(&mut String::new());
     }
     code
+}
+
+#[cfg(feature = "gui")]
+fn gui(minimized: bool) -> ExitCode {
+    tibia_net_optimizer::system::console::detach_if_owned();
+    match tibia_net_optimizer::ui::run(minimized) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("Error: could not start the dashboard: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(not(feature = "gui"))]
+fn gui(_minimized: bool) -> ExitCode {
+    eprintln!("This build has no GUI (built without the `gui` feature). Showing status instead.\n");
+    run(
+        &Cli {
+            command: Command::Status { json: false },
+            elevate: false,
+            pause: false,
+        },
+        &[],
+    )
 }
 
 fn run(cli: &Cli, raw: &[String]) -> ExitCode {
@@ -63,9 +92,10 @@ fn run(cli: &Cli, raw: &[String]) -> ExitCode {
             println!("{}", cli::USAGE);
             Ok(())
         }
+        Command::Gui { .. } => unreachable!("handled in main"),
         Command::Status { json } => status(&platform, json, elevated),
-        Command::Apply => apply(&platform),
-        Command::Revert => revert(&platform),
+        Command::Apply { only } => change(&platform, true, only),
+        Command::Revert { only } => change(&platform, false, only),
         Command::Startup(action) => startup_cmd(&platform, action),
     };
     match result {
@@ -87,77 +117,48 @@ fn load_config() -> (Config, Option<std::path::PathBuf>) {
 
 fn status(platform: &Platform, json: bool, elevated: bool) -> Result<()> {
     let (config, _) = load_config();
-    let reboot_recommended = boot::boot_time().is_some_and(|booted| {
-        boot::reboot_pending(config.autotuning_changed_at.map(boot::from_unix_secs), booted)
-    });
-    let report = StatusReport::build(StatusInputs {
-        os: platform.os,
-        tweaks: platform.tweaks.iter().map(|t| t.check()).collect(),
-        startup: platform.startup.is_registered(),
-        elevated,
-        reboot_recommended,
-    });
+    let report = report::collect(platform, elevated, config.autotuning_changed_at);
     println!("{}", if json { report.to_json() } else { report.to_text() });
     Ok(())
 }
 
-/// Remembers when a reboot-sensitive tweak changed.
-fn record_reboot_sensitive_change() {
-    let (mut config, path) = load_config();
-    config.autotuning_changed_at = Some(boot::to_unix_secs(SystemTime::now()));
-    if let Some(path) = path {
-        if let Err(e) = config.save(&path) {
-            eprintln!("Warning: could not save config: {e}");
+/// Applies or reverts all tweaks (or one), printing a line per tweak.
+fn change(platform: &Platform, applying: bool, only: Option<TweakId>) -> Result<()> {
+    let summary = run_tweaks(&platform.tweaks, applying, only);
+    if summary.outcomes.is_empty() {
+        if let Some(id) = only {
+            return Err(Error::Parse(format!(
+                "setting `{}` is not available on this OS",
+                id.key()
+            )));
         }
     }
-}
-
-/// Runs `op` on every tweak, continuing past failures, then reports the
-/// first error (if any).
-fn for_each_tweak(platform: &Platform, applying: bool) -> Result<()> {
-    let mut first_error = None;
-    let mut reboot = false;
-    for tweak in &platform.tweaks {
-        let before = tweak.check().state;
-        let (skip, verb) = if applying {
-            (before == TweakState::Optimized, "applied")
-        } else {
-            (false, "reverted")
+    for o in &summary.outcomes {
+        let text = match &o.outcome {
+            Outcome::Applied => "applied".to_string(),
+            Outcome::Reverted => "reverted".to_string(),
+            Outcome::AlreadyOptimized => "already optimized".to_string(),
+            Outcome::Failed(e) => format!("FAILED ({e})"),
         };
-        if skip {
-            println!("{:<26}: already optimized", tweak.label());
-            continue;
-        }
-        let result = if applying { tweak.apply() } else { tweak.revert() };
-        match result {
-            Ok(()) => {
-                println!("{:<26}: {verb}", tweak.label());
-                let changed = if applying {
-                    before != TweakState::Optimized
-                } else {
-                    before == TweakState::Optimized
-                };
-                reboot |= changed && tweak.reboot_recommended();
-            }
-            Err(e) => {
-                println!("{:<26}: FAILED ({e})", tweak.label());
-                first_error.get_or_insert(e);
-            }
-        }
+        println!("{:<26}: {text}", o.label);
     }
-    if reboot {
-        record_reboot_sensitive_change();
+    if summary.reboot_recommended {
+        let (mut config, path) = load_config();
+        config.autotuning_changed_at = Some(boot::to_unix_secs(SystemTime::now()));
+        if let Some(path) = path {
+            if let Err(e) = config.save(&path) {
+                eprintln!("Warning: could not save config: {e}");
+            }
+        }
         println!("Reboot recommended for the change to take full effect.");
     }
-    first_error.map_or(Ok(()), Err)
-}
-
-fn apply(platform: &Platform) -> Result<()> {
-    for_each_tweak(platform, true)
-}
-
-fn revert(platform: &Platform) -> Result<()> {
-    for_each_tweak(platform, false)
+    match summary.first_error() {
+        Some(e) => Err(Error::CommandFailed {
+            program: "tibia-net-optimizer".into(),
+            message: e,
+        }),
+        None => Ok(()),
+    }
 }
 
 fn startup_cmd(platform: &Platform, action: StartupAction) -> Result<()> {
@@ -169,7 +170,7 @@ fn startup_cmd(platform: &Platform, action: StartupAction) -> Result<()> {
         StartupAction::On => {
             let exe = std::env::current_exe()?;
             platform.startup.register(&exe)?;
-            println!("Run at startup: enabled ({} apply)", exe.display());
+            println!("Run at startup: enabled");
         }
         StartupAction::Off => {
             platform.startup.unregister()?;

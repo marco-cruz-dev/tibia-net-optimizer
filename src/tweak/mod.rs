@@ -26,6 +26,35 @@ pub enum TweakId {
     MacDelayedAck,
 }
 
+impl TweakId {
+    pub const ALL: [TweakId; 7] = [
+        TweakId::WinAutoTuning,
+        TweakId::WinNagle,
+        TweakId::LinuxModerateRcvbuf,
+        TweakId::LinuxAutocorking,
+        TweakId::LinuxQuickAck,
+        TweakId::MacAutoRcvbuf,
+        TweakId::MacDelayedAck,
+    ];
+
+    /// Stable identifier (same as the JSON form), e.g. `win_nagle`.
+    pub fn key(&self) -> &'static str {
+        match self {
+            TweakId::WinAutoTuning => "win_auto_tuning",
+            TweakId::WinNagle => "win_nagle",
+            TweakId::LinuxModerateRcvbuf => "linux_moderate_rcvbuf",
+            TweakId::LinuxAutocorking => "linux_autocorking",
+            TweakId::LinuxQuickAck => "linux_quick_ack",
+            TweakId::MacAutoRcvbuf => "mac_auto_rcvbuf",
+            TweakId::MacDelayedAck => "mac_delayed_ack",
+        }
+    }
+
+    pub fn parse(key: &str) -> Option<TweakId> {
+        TweakId::ALL.into_iter().find(|id| id.key() == key)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TweakState {
@@ -98,9 +127,86 @@ pub trait Tweak {
     }
 }
 
+/// A controllable in-memory tweak for tests (thread-safe so it can live in
+/// the GUI worker thread).
+#[cfg(test)]
+pub(crate) mod fake {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone)]
+    pub struct FakeTweak {
+        pub id: TweakId,
+        pub label: &'static str,
+        pub state: Arc<Mutex<TweakState>>,
+        pub fail: bool,
+        pub reboot: bool,
+    }
+
+    impl FakeTweak {
+        pub fn new(id: TweakId, label: &'static str, state: TweakState) -> Self {
+            Self {
+                id,
+                label,
+                state: Arc::new(Mutex::new(state)),
+                fail: false,
+                reboot: false,
+            }
+        }
+        pub fn failing(mut self) -> Self {
+            self.fail = true;
+            self
+        }
+        pub fn needing_reboot(mut self) -> Self {
+            self.reboot = true;
+            self
+        }
+        pub fn current(&self) -> TweakState {
+            *self.state.lock().unwrap()
+        }
+        fn set(&self, s: TweakState) -> Result<()> {
+            if self.fail {
+                return Err(crate::Error::AccessDenied);
+            }
+            *self.state.lock().unwrap() = s;
+            Ok(())
+        }
+    }
+
+    impl Tweak for FakeTweak {
+        fn id(&self) -> TweakId {
+            self.id
+        }
+        fn label(&self) -> &'static str {
+            self.label
+        }
+        fn check(&self) -> TweakStatus {
+            TweakStatus::new(self.id, self.label, self.current(), "fake")
+        }
+        fn apply(&self) -> Result<()> {
+            self.set(TweakState::Optimized)
+        }
+        fn revert(&self) -> Result<()> {
+            self.set(TweakState::NotOptimized)
+        }
+        fn reboot_recommended(&self) -> bool {
+            self.reboot
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keys_roundtrip_and_match_json() {
+        for id in TweakId::ALL {
+            assert_eq!(TweakId::parse(id.key()), Some(id));
+            assert_eq!(serde_json::to_value(id).unwrap(), id.key());
+        }
+        assert_eq!(TweakId::parse("nope"), None);
+    }
 
     #[test]
     fn states_describe_themselves() {

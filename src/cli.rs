@@ -1,9 +1,14 @@
 //! Command-line parsing (pure, unit-tested).
 //!
 //! ```text
-//! tibia-net-optimizer [status [--json] | apply | revert | startup [on|off|status]]
-//!                     [--elevate] [--pause] [--minimized] [-h|--help]
+//! tibia-net-optimizer [--minimized]                      # dashboard + tray (default)
+//! tibia-net-optimizer status [--json]
+//! tibia-net-optimizer apply|revert [--only <tweak-id>]
+//! tibia-net-optimizer startup [on|off|status]
+//!                     [--elevate] [--pause] [-h|--help]
 //! ```
+
+use crate::tweak::TweakId;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartupAction {
@@ -14,9 +19,19 @@ pub enum StartupAction {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Command {
-    Status { json: bool },
-    Apply,
-    Revert,
+    /// The tray + dashboard app.
+    Gui {
+        minimized: bool,
+    },
+    Status {
+        json: bool,
+    },
+    Apply {
+        only: Option<TweakId>,
+    },
+    Revert {
+        only: Option<TweakId>,
+    },
     Startup(StartupAction),
     Help,
 }
@@ -26,7 +41,9 @@ impl Command {
     pub fn requires_admin(&self) -> bool {
         matches!(
             self,
-            Command::Apply | Command::Revert | Command::Startup(StartupAction::On | StartupAction::Off)
+            Command::Apply { .. }
+                | Command::Revert { .. }
+                | Command::Startup(StartupAction::On | StartupAction::Off)
         )
     }
 }
@@ -44,16 +61,20 @@ pub const USAGE: &str = "\
 Usage: tibia-net-optimizer [COMMAND] [OPTIONS]
 
 Commands:
-  status [--json]          Show current optimization state (default, read-only)
-  apply                    Apply all optimizations for this OS (admin/root)
-  revert                   Restore the OS defaults (admin/root)
+  (none)                   Open the dashboard and tray icon (--minimized: tray only)
+  status [--json]          Show current optimization state (read-only)
+  apply [--only ID]        Apply all optimizations for this OS, or just one (admin/root)
+  revert [--only ID]       Restore the OS defaults, or just one setting (admin/root)
   startup [on|off|status]  Re-apply automatically at boot/logon (admin/root for on/off)
                            Windows: Task Scheduler, Linux: systemd, macOS: launchd
 
 Options:
   --elevate                Relaunch with admin rights (UAC / sudo / pkexec) if needed
   --pause                  Wait for Enter before exiting
-  -h, --help               Show this help";
+  -h, --help               Show this help
+
+Setting IDs (see `status --json`): win_auto_tuning, win_nagle, linux_moderate_rcvbuf,
+  linux_autocorking, linux_quick_ack, mac_auto_rcvbuf, mac_delayed_ack";
 
 /// Parses arguments (without the program name).
 pub fn parse_args<I, S>(args: I) -> Result<Cli, String>
@@ -61,14 +82,25 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
-    let (mut elevate, mut pause, mut json, mut help) = (false, false, false, false);
+    let (mut elevate, mut pause, mut json, mut help, mut minimized) = (false, false, false, false, false);
+    let mut only = None;
     let mut positional = Vec::new();
-    for arg in args {
+    let mut iter = args.into_iter();
+    while let Some(arg) = iter.next() {
         match arg.as_ref() {
             "--elevate" => elevate = true,
             "--pause" => pause = true,
             "--json" => json = true,
-            "--minimized" => {}
+            "--minimized" => minimized = true,
+            "--only" => {
+                let key = iter.next().ok_or("--only needs a setting ID")?;
+                let key = key.as_ref();
+                let id = TweakId::parse(key).ok_or_else(|| {
+                    let valid: Vec<&str> = TweakId::ALL.iter().map(|i| i.key()).collect();
+                    format!("unknown setting `{key}` (valid: {})", valid.join(", "))
+                })?;
+                only = Some(id);
+            }
             "-h" | "--help" => help = true,
             flag if flag.starts_with('-') => return Err(format!("unknown option `{flag}`")),
             word => positional.push(word.to_string()),
@@ -80,9 +112,11 @@ where
         Command::Help
     } else {
         match words.as_slice() {
-            [] | ["status"] => Command::Status { json },
-            ["apply"] => Command::Apply,
-            ["revert"] => Command::Revert,
+            [] if json => Command::Status { json },
+            [] => Command::Gui { minimized },
+            ["status"] => Command::Status { json },
+            ["apply"] => Command::Apply { only },
+            ["revert"] => Command::Revert { only },
             ["help"] => Command::Help,
             ["startup"] | ["startup", "status"] => Command::Startup(StartupAction::Status),
             ["startup", "on"] => Command::Startup(StartupAction::On),
@@ -97,6 +131,14 @@ where
 
     if json && !matches!(command, Command::Status { .. } | Command::Help) {
         return Err("--json is only valid with `status`".into());
+    }
+    if only.is_some()
+        && !matches!(
+            command,
+            Command::Apply { .. } | Command::Revert { .. } | Command::Help
+        )
+    {
+        return Err("--only is only valid with `apply` or `revert`".into());
     }
     Ok(Cli {
         command,
@@ -130,15 +172,16 @@ mod tests {
     }
 
     #[test]
-    fn defaults_to_status() {
+    fn defaults_to_gui() {
         assert_eq!(
             parse(&[]).unwrap(),
             Cli {
-                command: Command::Status { json: false },
+                command: Command::Gui { minimized: false },
                 elevate: false,
                 pause: false
             }
         );
+        assert_eq!(cmd(&["--minimized"]), Command::Gui { minimized: true });
     }
 
     #[test]
@@ -146,11 +189,40 @@ mod tests {
         assert_eq!(cmd(&["status"]), Command::Status { json: false });
         assert_eq!(cmd(&["status", "--json"]), Command::Status { json: true });
         assert_eq!(cmd(&["--json"]), Command::Status { json: true });
-        assert_eq!(cmd(&["apply"]), Command::Apply);
-        assert_eq!(cmd(&["revert"]), Command::Revert);
+        assert_eq!(cmd(&["apply"]), Command::Apply { only: None });
+        assert_eq!(cmd(&["revert"]), Command::Revert { only: None });
         assert_eq!(cmd(&["help"]), Command::Help);
         assert_eq!(cmd(&["-h"]), Command::Help);
         assert_eq!(cmd(&["apply", "--help"]), Command::Help);
+    }
+
+    #[test]
+    fn parses_only_for_apply_and_revert() {
+        assert_eq!(
+            cmd(&["apply", "--only", "win_nagle"]),
+            Command::Apply {
+                only: Some(TweakId::WinNagle)
+            }
+        );
+        assert_eq!(
+            cmd(&["--only", "linux_quick_ack", "revert"]),
+            Command::Revert {
+                only: Some(TweakId::LinuxQuickAck)
+            }
+        );
+    }
+
+    #[test]
+    fn only_requires_a_known_id_and_a_tweak_command() {
+        let err = parse(&["apply", "--only"]).unwrap_err();
+        assert!(err.contains("--only needs"), "{err}");
+        let err = parse(&["apply", "--only", "bogus"]).unwrap_err();
+        assert!(
+            err.contains("unknown setting `bogus`") && err.contains("win_nagle"),
+            "{err}"
+        );
+        let err = parse(&["status", "--only", "win_nagle"]).unwrap_err();
+        assert!(err.contains("--only is only valid"), "{err}");
     }
 
     #[test]
@@ -167,14 +239,13 @@ mod tests {
     #[test]
     fn flags_can_appear_anywhere() {
         let cli = parse(&["--elevate", "apply", "--pause"]).unwrap();
-        assert_eq!(cli.command, Command::Apply);
+        assert_eq!(cli.command, Command::Apply { only: None });
         assert!(cli.elevate && cli.pause);
     }
 
     #[test]
-    fn minimized_flag_is_accepted() {
-        // Passed by the Task Scheduler entry; meaningful once the GUI exists.
-        assert_eq!(cmd(&["--minimized"]), Command::Status { json: false });
+    fn minimized_is_ignored_for_cli_commands() {
+        assert_eq!(cmd(&["status", "--minimized"]), Command::Status { json: false });
     }
 
     #[test]
@@ -194,12 +265,13 @@ mod tests {
 
     #[test]
     fn admin_required_only_for_mutating_commands() {
-        assert!(Command::Apply.requires_admin());
-        assert!(Command::Revert.requires_admin());
+        assert!(Command::Apply { only: None }.requires_admin());
+        assert!(Command::Revert { only: None }.requires_admin());
         assert!(Command::Startup(StartupAction::On).requires_admin());
         assert!(Command::Startup(StartupAction::Off).requires_admin());
         assert!(!Command::Startup(StartupAction::Status).requires_admin());
         assert!(!Command::Status { json: false }.requires_admin());
+        assert!(!Command::Gui { minimized: false }.requires_admin());
         assert!(!Command::Help.requires_admin());
     }
 

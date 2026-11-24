@@ -124,13 +124,29 @@ pub fn relaunch_elevated(args: &[String]) -> crate::Result<()> {
 #[cfg(unix)]
 pub fn relaunch_elevated(args: &[String]) -> crate::Result<()> {
     use std::io::IsTerminal;
+    run_elevated(args, std::io::stdin().is_terminal())
+}
 
+/// Runs `<this exe> args...` as root via a graphical prompt (pkexec / macOS
+/// admin dialog) and waits. Used by the GUI on Linux/macOS without root.
+#[cfg(unix)]
+pub fn run_elevated_helper(args: &[String]) -> Result<(), String> {
+    run_elevated(args, false).map_err(|e| e.to_string())
+}
+
+#[cfg(not(unix))]
+pub fn run_elevated_helper(_args: &[String]) -> Result<(), String> {
+    Err("elevated helper is only used on Linux/macOS".into())
+}
+
+#[cfg(unix)]
+fn run_elevated(args: &[String], interactive: bool) -> crate::Result<()> {
     let exe = std::env::current_exe()?;
     let (program, argv) = crate::unix::elevate::elevation_command(
         crate::platform::Os::current(),
         &exe.to_string_lossy(),
         args,
-        std::io::stdin().is_terminal(),
+        interactive,
     );
     let status = std::process::Command::new(&program).args(&argv).status()?;
     if status.success() {

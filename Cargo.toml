@@ -2,7 +2,7 @@
 name = "tibia-net-optimizer"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.82"
+rust-version = "1.95"
 license = "GPL-3.0-only"
 description = "Windows tray utility that tunes TCP settings (auto-tuning, Nagle) for low-latency Tibia play"
 readme = "README.md"
@@ -10,9 +10,23 @@ readme = "README.md"
 # Sprint 1 keeps dependencies minimal: only what the domain core + Windows
 # adapters need. GUI/tray crates (eframe, egui, tray-icon, image) and the
 # `windows` crate are added in the sprints that introduce those features.
+[features]
+# The tray + dashboard GUI. Disable for a CLI-only build:
+#   cargo build --no-default-features
+default = ["gui"]
+gui = ["dep:eframe", "dep:tray-icon"]
+
 [dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+# glow (OpenGL) instead of the default wgpu keeps the binary small.
+eframe = { version = "0.37", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"], optional = true }
+tray-icon = { version = "0.26", default-features = false, optional = true }
+
+# Linux tray via the pure-Rust StatusNotifierItem (D-Bus) backend: no GTK or
+# libappindicator system libraries needed.
+[target.'cfg(target_os = "linux")'.dependencies]
+tray-icon = { version = "0.26", default-features = false, features = ["ksni"], optional = true }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
@@ -24,6 +38,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",
     "Win32_Security",
+    "Win32_System_Console",
     "Win32_System_SystemInformation",
     "Win32_System_Threading",
     "Win32_UI_Shell",

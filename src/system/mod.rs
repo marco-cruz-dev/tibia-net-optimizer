@@ -2,6 +2,7 @@
 
 pub mod boot;
 pub mod command;
+pub mod console;
 pub mod elevation;
 pub mod encoding;
 pub mod startup;

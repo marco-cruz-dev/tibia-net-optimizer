@@ -20,6 +20,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo fmt --all -- --check
       - run: cargo clippy --all-targets -- -D warnings
+      # CLI-only build (no GUI) must keep working too.
+      - run: cargo clippy --all-targets --no-default-features -- -D warnings
       - run: cargo test
       # Read-only checks against the runner's real OS settings.
       - run: cargo test -- --ignored --nocapture

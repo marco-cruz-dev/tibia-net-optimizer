@@ -5,9 +5,8 @@ that **Tibia** stops dropping inputs, losing spell casts and rubber-banding on
 distant servers (for example Secura in Frankfurt played from Portugal), even
 when ping looks fine. It runs on **Windows**, **Linux** and **macOS**.
 
-> **Status: Sprint 3 of 7 done.** You can use the tested core through a CLI on
-> all three OSes. Next is the system tray and GUI. See
-> [docs/BACKLOG.md](docs/BACKLOG.md).
+> **Status: Sprint 4 of 7 done.** The app has a tray icon and dashboard, plus a full CLI, on all three OSes.
+> Next is background auto-heal. See [docs/BACKLOG.md](docs/BACKLOG.md).
 
 ## Why
 
@@ -39,19 +38,22 @@ recorded and restored.
 - [x] "Reboot recommended" after a Windows auto-tuning change.
 - [x] Settings in the OS-appropriate config directory.
 - [x] Latency, jitter and packet-loss statistics engine.
-- [ ] System tray icon (green/red) and egui dashboard (Sprint 4).
+- [x] **Dashboard + system tray**: a colour-coded tray icon (green/red/amber), a status banner, a card per setting with a toggle and explanation, Optimize Now / Revert, and automation checkboxes. Closing the window minimizes it to the tray.
 - [ ] Background auto-heal with notifications (Sprint 5).
 - [ ] Live ping and jitter monitor for Secura/Frankfurt (Sprint 6).
 
-## Usage (current CLI)
+## Usage
+
+Run the app with no arguments to open the **dashboard and tray icon**. Without admin/root rights the dashboard is read-only: on Windows it offers **Restart as Administrator**, and on Linux/macOS each change asks for your password.
 
 ```text
 tibia-net-optimizer [COMMAND] [OPTIONS]
 
 Commands:
-  status [--json]          Show current optimization state (default, read-only)
-  apply                    Apply all optimizations for this OS (admin/root)
-  revert                   Restore the OS defaults (admin/root)
+  (none)                   Open the dashboard and tray icon (--minimized: tray only)
+  status [--json]          Show current optimization state (read-only)
+  apply [--only ID]        Apply all optimizations for this OS, or just one (admin/root)
+  revert [--only ID]       Restore the OS defaults, or just one setting (admin/root)
   startup [on|off|status]  Re-apply automatically at boot/logon (admin/root for on/off)
                            Windows: Task Scheduler, Linux: systemd, macOS: launchd
 
@@ -64,14 +66,16 @@ Options:
 ```powershell
 # Windows
 cargo build --release
-.\target\release\tibia-net-optimizer.exe                  # status, no admin needed
+.\target\release\tibia-net-optimizer.exe                  # dashboard + tray
+.\target\release\tibia-net-optimizer.exe status           # text status, no admin needed
 .\target\release\tibia-net-optimizer.exe apply --elevate  # UAC prompt, then applies
 ```
 
 ```sh
 # Linux / macOS
 cargo build --release
-./target/release/tibia-net-optimizer                      # status, no root needed
+./target/release/tibia-net-optimizer                      # dashboard + tray
+./target/release/tibia-net-optimizer status               # text status, no root needed
 sudo ./target/release/tibia-net-optimizer apply
 ```
 
@@ -94,9 +98,10 @@ state, summary, details[] }], startup, reboot_recommended }`.
 
 ### Prerequisites
 
-- Rust stable, 1.82 or newer
+- Rust stable, 1.95 or newer (eframe 0.37)
 - **Windows:** MSVC toolchain (`winget install Rustlang.Rustup`) and Visual Studio Build Tools ("Desktop development with C++")
-- **Linux/macOS:** a standard `rustup` install. Runtime tools used: `sysctl`, `ip` (iproute2), `systemctl`
+- **Linux/macOS:** a standard `rustup` install. No GUI system libraries are needed to build: the Linux tray uses a pure-Rust D-Bus backend. Runtime tools used: `sysctl`, `ip` (iproute2), `systemctl`, and `pkexec` (GUI elevation). Running the GUI needs OpenGL and, for the tray, a StatusNotifierItem host (KDE, XFCE, GNOME with the AppIndicator extension, ...).
+- **CLI-only build:** `cargo build --release --no-default-features` (no GUI, about 0.3 MB instead of 5.4 MB).
 
 ### Commands
 
@@ -105,7 +110,8 @@ cargo test                                   # fast unit tests (fakes, no OS cha
 cargo test -- --ignored --nocapture          # read-only smoke tests against this machine
 cargo clippy --all-targets -- -D warnings    # lint
 cargo fmt --all                              # format
-cargo run -- status                          # try it
+cargo run                                    # dashboard + tray
+cargo run -- status                          # CLI status
 
 # Lint other OSes without leaving yours (needs `rustup target add ...`):
 cargo clippy --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
@@ -130,8 +136,9 @@ This project uses short, agile sprints and test-driven development:
 A **ports and adapters** design keeps the tests fast, safe and OS-independent:
 
 ```text
- main.rs (CLI, later GUI)
-    │  platform::current()  ──►  Platform { os, tweaks: Vec<Box<dyn Tweak>>, startup }
+ ui/ (egui window + tray, thin) ──Msg──► app::state (pure reducer) ──Effect──► app::worker (thread)
+ main.rs (CLI)                                   app::view (pure view model)          │
+    │  platform::current()  ──►  Platform { os, tweaks: Vec<Box<dyn Tweak>>, startup } ◄┘
     ▼
  ┌──────────────────────────── pure, unit-tested on every OS ───────────────────────────┐
  │ Tweak model · optimizer (overall, heal plan) · report (text/JSON) · cli · config     │
@@ -150,8 +157,12 @@ Tests **never modify** system settings. The smoke tests only read.
 
 ```text
 src/
-├── main.rs              Platform-agnostic CLI shell
+├── main.rs              Entry point: GUI by default, or a CLI command
 ├── cli.rs               Argument parsing and relaunch args
+├── actions.rs           Apply/revert/startup actions shared by the CLI and the GUI worker
+├── app/                 GUI logic, toolkit-independent and unit-tested:
+│                        state (reducer), view (view model), icon (pixels), worker (thread)
+├── ui/                  egui window + tray glue (feature `gui`)
 ├── report.rs            Status report: text and JSON
 ├── optimizer.rs         Overall status and auto-heal plan over tweak statuses
 ├── config.rs            JSON settings in the per-OS config directory
@@ -164,14 +175,13 @@ src/
 ├── network/             Windows networking: netsh, registry, IP Helper, adapters; ping stats
 ├── unix/                sysctl port, persistence (sysctl.d / plist), ip route,
 │                        systemd/launchd, sudo/pkexec/osascript
-└── system/              Command runner, elevation, encoding, boot time, Task Scheduler
+└── system/              Command runner, elevation, console, encoding, boot time, Task Scheduler
 tests/
 ├── system_smoke.rs      Windows read-only smoke tests
 └── unix_smoke.rs        Linux/macOS read-only smoke tests
 docs/
 ├── BACKLOG.md           Sprint plan, Definition of Done, manual QA checklist
 └── spikes/              Investigations (S3-0: Unix tweak effectiveness)
-project_info.md          Original product specification
 ```
 
 ## Disclaimer

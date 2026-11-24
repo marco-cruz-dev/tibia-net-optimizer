@@ -67,6 +67,31 @@ pub fn unregister(runner: &impl CommandRunner) -> Result<()> {
 }
 
 #[cfg(test)]
+pub(crate) mod fake {
+    use super::*;
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    pub struct FakeStartup {
+        pub registered: Arc<Mutex<bool>>,
+    }
+
+    impl StartupManager for FakeStartup {
+        fn is_registered(&self) -> Result<bool> {
+            Ok(*self.registered.lock().unwrap())
+        }
+        fn register(&self, _exe: &Path) -> Result<()> {
+            *self.registered.lock().unwrap() = true;
+            Ok(())
+        }
+        fn unregister(&self) -> Result<()> {
+            *self.registered.lock().unwrap() = false;
+            Ok(())
+        }
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::system::command::fake::FakeRunner;

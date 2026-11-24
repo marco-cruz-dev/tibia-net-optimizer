@@ -3,7 +3,8 @@
 use serde::Serialize;
 
 use crate::optimizer;
-use crate::platform::Os;
+use crate::platform::{Os, Platform};
+use crate::system::boot;
 use crate::tweak::TweakStatus;
 use crate::Result;
 
@@ -29,6 +30,20 @@ pub struct StatusInputs {
 }
 
 const LABEL_WIDTH: usize = 26;
+
+/// Checks every tweak and the startup entry of `platform` (slow: runs OS
+/// commands). `autotuning_changed_at` drives the reboot reminder.
+pub fn collect(platform: &Platform, elevated: bool, autotuning_changed_at: Option<u64>) -> StatusReport {
+    let reboot_recommended = boot::boot_time()
+        .is_some_and(|booted| boot::reboot_pending(autotuning_changed_at.map(boot::from_unix_secs), booted));
+    StatusReport::build(StatusInputs {
+        os: platform.os,
+        tweaks: platform.tweaks.iter().map(|t| t.check()).collect(),
+        startup: platform.startup.is_registered(),
+        elevated,
+        reboot_recommended,
+    })
+}
 
 impl StatusReport {
     pub fn build(inputs: StatusInputs) -> Self {
@@ -131,6 +146,32 @@ mod tests {
             elevated,
             reboot_recommended: reboot,
         })
+    }
+
+    #[test]
+    fn collect_checks_tweaks_and_startup() {
+        use crate::system::startup::fake::FakeStartup;
+        use crate::tweak::fake::FakeTweak;
+        use crate::tweak::Tweak;
+
+        let startup = FakeStartup::default();
+        *startup.registered.lock().unwrap() = true;
+        let p = Platform {
+            os: Os::Linux,
+            tweaks: vec![Box::new(FakeTweak::new(
+                TweakId::LinuxAutocorking,
+                "C",
+                TweakState::NotOptimized,
+            )) as Box<dyn Tweak>],
+            startup: Box::new(startup),
+        };
+        let r = collect(&p, false, None);
+        assert_eq!(r.platform, Os::Linux);
+        assert_eq!(r.overall, "needs_fix");
+        assert_eq!(r.tweaks.len(), 1);
+        assert_eq!(r.startup, Some(true));
+        assert!(!r.elevated);
+        assert!(!r.reboot_recommended, "nothing changed");
     }
 
     #[test]

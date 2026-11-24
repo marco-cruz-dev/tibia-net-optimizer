@@ -11,6 +11,8 @@
 //!   `StartupManager`. Real adapters are thin and covered by `#[ignore]`d
 //!   read-only smoke tests in `tests/`.
 
+pub mod actions;
+pub mod app;
 pub mod cli;
 pub mod config;
 pub mod error;
@@ -20,6 +22,8 @@ pub mod platform;
 pub mod report;
 pub mod system;
 pub mod tweak;
+#[cfg(feature = "gui")]
+pub mod ui;
 pub mod unix;
 
 pub use error::{Error, Result};
