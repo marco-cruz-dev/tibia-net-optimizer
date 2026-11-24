@@ -57,6 +57,7 @@ manual QA checklist.
 | Linux | `sudo tibia-net-optimizer apply` → `/etc/sysctl.d/99-tibia-net-optimizer.conf` exists, `ip route show default` shows `quickack 1`. Reconnect Wi-Fi → quickack is still on (NetworkManager hook). Reboot → still optimized. `sudo ... revert` → original values restored and files removed. `sudo ... startup on/off` → `systemctl is-enabled tibia-net-optimizer`. |
 | macOS | `sudo tibia-net-optimizer apply` → `sysctl net.inet.tcp.delayed_ack` = 0 and the plist exists in `/Library/LaunchDaemons`. Reboot → still 0. `revert` → `delayed_ack` back to 3 and plist removed. `startup on/off`. |
 | Auto-heal (Windows) | `startup on --elevate` and log in again (the app starts elevated in the tray). Tick "Auto-heal". In an admin terminal: `netsh int tcp set global autotuninglevel=normal`. Within 60 s: toast "...re-applied: TCP auto-tuning", the tray turns green, and `status` shows disabled. Click Revert in the dashboard → auto-heal unticks with an explanation, and nothing gets re-applied. |
+| Latency monitor | Dashboard → Live Connection Monitor → **Start**: within about 4 s, Ping/Average show values (≈50 ms from Portugal), Jitter/Loss turn coloured and the sparkline draws. Hide to the tray, then reopen: probing pauses, then resumes. Enter `1.2.3.4:abc` → "Invalid ping target". Enter `fra-de-ping.vultr.com:443` → method shows "TCP :443". |
 | GUI (all) | Launch with no args → dashboard shows real status and a coloured tray icon. Left-click the tray → window shows. Right-click → menu: Status, Open Dashboard, Apply, Revert, separator, Quit. Close the window → hides to the tray (with "Minimize to tray" on) or quits (off). Toggle a card / Optimize Now / Revert: Windows admin → in-process; Windows user → "Restart as Administrator" relaunches elevated; Linux/macOS user → password prompt (pkexec / macOS dialog). `--minimized` → starts in the tray only. |
 
 ## Sprint 3 — Cross-platform core: Linux & macOS ✅ (spike pending)
@@ -209,11 +210,33 @@ Known limitations / follow-ups:
 - The end-to-end heal (an elevated GUI with real settings drifting) is on the
   manual QA checklist.
 
-## Sprint 6 — Live latency monitor ⏳
+## Sprint 6 — Live latency monitor ✅ (Start/Stop click path: manual QA)
 
-- Sampler: `IcmpSendEcho` on Windows; unprivileged ICMP sockets on Unix where allowed; TCP-connect latency as the fallback everywhere. Probe every 2–5 s **while the window is open**, and feed `LatencyStats`.
-- UI: target host input (default `secura.tibia.com`), Start/Stop button, **Current ping**, **Average**, **Jitter** (the key metric for smooth movement in Tibia) and **Packet loss %**. Optional sparkline with `egui_plot`.
-- Verify that the default target resolves and answers probes. If not, choose a reliable Frankfurt fallback.
+**Default-target check (done during planning, 2026-11-24):** `secura.tibia.com`
+has **no DNS record**; Tibia game-world IPs are handed out by the login
+server. `www.tibia.com` is Cloudflare anycast, so it measures the nearest
+edge, not Frankfurt. The new default is **`fra-de-ping.vultr.com`**, a public
+Frankfurt ping endpoint that answers ICMP and TCP 443 (≈52 ms from the dev
+machine in Portugal). Saved configs holding the old default are migrated.
+
+Done test-first (29 tests run red, then green). The suite grew from 218 to
+244 unit tests, plus 3 new smoke tests.
+
+| ID | Story | Status |
+|----|-------|--------|
+| S6-1 | **Target parsing and probe method.** | ✅ `network/probe.rs`: `host`, `host:port`, `[v6]:port`, bare IPv6, with clear errors. A port means TCP connect; no port means ICMP on Windows and TCP 443 on Linux/macOS. |
+| S6-2 | **Probers.** | ✅ TCP connect (all OSes; tested against a local listener, including refusal). ICMP via `IcmpSendEcho` (`network/icmp.rs`, no admin needed). Smoke-tested on loopback and against Frankfurt: **52 ms** from the dev machine. |
+| S6-3 | **Monitor thread.** | ✅ `app/ping.rs`: a probe every 2 s with a 1 s timeout. Stopping never blocks the UI (the thread isn't joined), and late samples carry an old *generation* that the reducer ignores. |
+| S6-4 | **State and view.** | ✅ Start validates and saves the target. Probing runs only **while running and the window is visible**: hiding to the tray pauses, showing resumes with a new generation. Restart clears the stats. Current/average in ms, jitter to 0.1 ms (green < 5, amber < 15, red), loss % (green 0, amber ≤ 2, red). |
+| S6-5 | **UI.** | ✅ A "Live Connection Monitor" section with a target box, method label, Start/Stop, a stats grid and a sparkline painted with egui (no plot dependency; lost probes show as red ticks). Rendering checked in a screenshot. ⏳ The **Start click path wasn't exercised at runtime**: the test click was intercepted by another app on top, so it's on the manual QA list. |
+| S6-6 | *(follow-up)* **Auto-detect the game server** from the running Tibia client's TCP connection (`GetExtendedTcpTable` with owning PID on Windows; `/proc/net/tcp` on Linux). | Later sprint. |
+
+Known limitations / follow-ups:
+- ICMP on Linux/macOS (unprivileged datagram sockets) isn't implemented;
+  those platforms probe TCP 443, which measures the same path plus a
+  negligible handshake cost.
+- `IcmpSendEcho` has 1 ms resolution, which is fine for jitter at Tibia's
+  scale. A `host:port` target gives TCP timing with microsecond resolution.
 
 ## Sprint 7 — Release ⏳
 

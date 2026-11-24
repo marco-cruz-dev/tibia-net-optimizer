@@ -1,7 +1,7 @@
 //! The dashboard window (eframe/egui).
 
 use std::path::PathBuf;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,10 +10,12 @@ use eframe::egui::{self, Color32, RichText};
 use super::tray::Tray;
 use crate::actions::Action;
 use crate::app::icon::{circle_rgba, tone_rgb, GREY};
-use crate::app::state::{AppState, Effect, Msg, NoticeKind};
-use crate::app::view::{Tone, TrayView, View};
+use crate::app::ping::{PingMonitor, PING_INTERVAL, PROBE_TIMEOUT};
+use crate::app::state::{AppState, Effect, Msg, NoticeKind, PING_WINDOW};
+use crate::app::view::{PingView, Tone, TrayView, View};
 use crate::app::worker::Worker;
 use crate::config::Config;
+use crate::network::probe::{parse_target, probe_once};
 use crate::platform::{self, Os};
 use crate::system::{elevation, notify};
 
@@ -35,7 +37,7 @@ pub fn run(minimized: bool) -> Result<(), String> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(TITLE)
-            .with_inner_size([420.0, 560.0])
+            .with_inner_size([420.0, 600.0])
             .with_resizable(false)
             .with_maximize_button(false)
             .with_visible(!minimized)
@@ -55,6 +57,9 @@ struct Dashboard {
     worker: Worker,
     tray: Option<Tray>,
     ui_events: Receiver<Msg>,
+    /// Lets background threads (tray, ping monitor) post messages.
+    ui_tx: Sender<Msg>,
+    ping: Option<PingMonitor>,
     config_path: Option<PathBuf>,
     allow_close: bool,
     /// eframe always shows the window after its first painted frame (egui
@@ -89,7 +94,7 @@ impl Dashboard {
             move || wake.request_repaint(),
         );
 
-        let tray = match Tray::new(tx, ctx.clone()) {
+        let tray = match Tray::new(tx.clone(), ctx.clone()) {
             Ok(t) => Some(t),
             Err(e) => {
                 eprintln!("System tray unavailable: {e}");
@@ -102,6 +107,8 @@ impl Dashboard {
             worker,
             tray,
             ui_events,
+            ui_tx: tx,
+            ping: None,
             config_path,
             allow_close: false,
             pending_initial_hide: false,
@@ -155,7 +162,67 @@ impl Dashboard {
                     }
                 });
             }
+            Effect::StartPing { target, generation } => {
+                // The reducer validated the target already.
+                let Ok(target) = parse_target(&target) else { return };
+                let (tx, wake) = (self.ui_tx.clone(), ctx.clone());
+                // Replacing the monitor drops (stops) the previous one.
+                self.ping = Some(PingMonitor::start(
+                    generation,
+                    Box::new(move || probe_once(&target, PROBE_TIMEOUT)),
+                    PING_INTERVAL,
+                    move |sample| {
+                        let _ = tx.send(Msg::Ping(sample));
+                        wake.request_repaint();
+                    },
+                ));
+            }
+            Effect::StopPing => self.ping = None,
             Effect::Quit => self.quit(ctx),
+        }
+    }
+
+    fn render_ping(ui: &mut egui::Ui, p: &PingView, out: &mut Vec<Msg>) {
+        ui.label(RichText::new("Live Connection Monitor").strong());
+        ui.horizontal(|ui| {
+            let mut target = p.target_input.clone();
+            let edit = ui
+                .add_enabled(
+                    !p.running,
+                    egui::TextEdit::singleline(&mut target).desired_width(190.0),
+                )
+                .on_hover_text("Host or IP, optionally with :port (TCP). Default: a Frankfurt test server.");
+            if edit.changed() {
+                out.push(Msg::PingTargetEdited(target));
+            }
+            ui.label(RichText::new(&p.method).small().weak());
+            if ui.button(p.button).clicked() {
+                out.push(if p.running { Msg::PingStop } else { Msg::PingStart });
+            }
+        });
+        egui::Grid::new("ping-stats")
+            .num_columns(4)
+            .spacing([18.0, 2.0])
+            .show(ui, |ui| {
+                for label in ["Ping", "Average", "Jitter", "Loss"] {
+                    ui.label(RichText::new(label).small().weak());
+                }
+                ui.end_row();
+                ui.label(RichText::new(&p.current).strong());
+                ui.label(RichText::new(&p.average).strong());
+                ui.label(RichText::new(&p.jitter).strong().color(colour(p.jitter_tone)));
+                ui.label(RichText::new(&p.loss).strong().color(colour(p.loss_tone)));
+                ui.end_row();
+            });
+        sparkline(ui, &p.points);
+        if p.paused {
+            ui.label(RichText::new("Paused while the window is hidden.").small().weak());
+        } else if let Some(e) = &p.error {
+            ui.label(
+                RichText::new(format!("Last probe failed: {e}"))
+                    .small()
+                    .color(colour(Tone::Bad)),
+            );
         }
     }
 
@@ -164,7 +231,7 @@ impl Dashboard {
         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
     }
 
-    fn render(&self, ui: &mut egui::Ui, view: &View) -> Vec<Msg> {
+    fn render(&self, ui: &mut egui::Ui, view: &View, ping: &PingView) -> Vec<Msg> {
         let mut out = Vec::new();
 
         ui.horizontal(|ui| {
@@ -199,7 +266,7 @@ impl Dashboard {
             });
         ui.add_space(4.0);
 
-        egui::ScrollArea::vertical().max_height(250.0).show(ui, |ui| {
+        egui::ScrollArea::vertical().max_height(230.0).show(ui, |ui| {
             for card in &view.cards {
                 egui::Frame::group(ui.style()).show(ui, |ui| {
                     ui.set_width(ui.available_width());
@@ -253,6 +320,9 @@ impl Dashboard {
         });
 
         ui.separator();
+        Self::render_ping(ui, ping, &mut out);
+
+        ui.separator();
         ui.label(RichText::new("Automation").strong());
         let mut auto_heal = view.auto_heal_checked;
         if ui
@@ -302,6 +372,48 @@ impl Dashboard {
     }
 }
 
+/// RTT history: one slot per sample in the stats window, newest on the right.
+/// Lost probes are red ticks along the bottom.
+fn sparkline(ui: &mut egui::Ui, points: &[Option<f64>]) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 48.0), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, 4.0, ui.visuals().extreme_bg_color);
+    let values: Vec<f64> = points.iter().flatten().copied().collect();
+    if values.is_empty() {
+        return;
+    }
+    let lo = values.iter().copied().fold(f64::INFINITY, f64::min) * 0.9;
+    let hi = (values.iter().copied().fold(f64::NEG_INFINITY, f64::max) * 1.1).max(lo + 1.0);
+    let step = rect.width() / (PING_WINDOW - 1) as f32;
+    let offset = PING_WINDOW.saturating_sub(points.len());
+    let x = |i: usize| rect.left() + (offset + i) as f32 * step;
+    let y = |v: f64| rect.bottom() - 4.0 - ((v - lo) / (hi - lo)) as f32 * (rect.height() - 8.0);
+
+    let line = egui::Stroke::new(1.5, colour(Tone::Good));
+    let mut segment: Vec<egui::Pos2> = Vec::new();
+    for (i, p) in points.iter().enumerate() {
+        match p {
+            Some(v) => segment.push(egui::pos2(x(i), y(*v))),
+            None => {
+                if segment.len() > 1 {
+                    painter.add(egui::Shape::line(std::mem::take(&mut segment), line));
+                }
+                segment.clear();
+                let bx = x(i);
+                painter.line_segment(
+                    [egui::pos2(bx, rect.bottom() - 6.0), egui::pos2(bx, rect.bottom())],
+                    egui::Stroke::new(2.0, colour(Tone::Bad)),
+                );
+            }
+        }
+    }
+    if segment.len() > 1 {
+        painter.add(egui::Shape::line(segment, line));
+    } else if let Some(p) = segment.first() {
+        painter.circle_filled(*p, 2.0, colour(Tone::Good));
+    }
+}
+
 impl eframe::App for Dashboard {
     /// Runs before every frame and also while hidden (woken by the worker
     /// and tray via `request_repaint`).
@@ -337,7 +449,7 @@ impl eframe::App for Dashboard {
         let view = View::from_state(&self.state);
         let mut out = Vec::new();
         egui::CentralPanel::default().show(ui, |ui| {
-            out = self.render(ui, &view);
+            out = self.render(ui, &view, &PingView::from_state(&self.state));
         });
         for msg in out {
             self.dispatch(&ctx, msg);

@@ -1,12 +1,12 @@
 //! Rolling latency / jitter / packet-loss statistics.
 //!
-//! Pure data structure; the actual ICMP/TCP sampler arrives in a later sprint
-//! and simply feeds samples into [`LatencyStats::record`].
+//! Pure data structure; the probers (`network::probe`) and the monitor
+//! thread (`app::ping`) feed samples into [`LatencyStats::record`].
 
 use std::collections::VecDeque;
 use std::time::Duration;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct LatencyStats {
     capacity: usize,
     /// `None` = lost probe (timeout).
@@ -33,6 +33,15 @@ impl LatencyStats {
 
     pub fn len(&self) -> usize {
         self.samples.len()
+    }
+
+    /// Oldest-first samples in ms (`None` = lost), for the sparkline.
+    pub fn samples_ms(&self) -> Vec<Option<f64>> {
+        self.samples.iter().copied().collect()
+    }
+
+    pub fn clear(&mut self) {
+        self.samples.clear();
     }
 
     pub fn is_empty(&self) -> bool {
@@ -147,6 +156,18 @@ mod tests {
         assert_eq!(s.len(), 3);
         approx(s.average_ms(), 100.0);
         approx(s.jitter_ms(), 0.0);
+    }
+
+    #[test]
+    fn exposes_samples_oldest_first_and_clears() {
+        let mut s = LatencyStats::new(3);
+        for v in [ms(10), None, ms(30), ms(40)] {
+            s.record(v);
+        }
+        assert_eq!(s.samples_ms(), vec![None, Some(30.0), Some(40.0)]);
+        s.clear();
+        assert!(s.is_empty());
+        assert_eq!(s.samples_ms(), vec![]);
     }
 
     #[test]

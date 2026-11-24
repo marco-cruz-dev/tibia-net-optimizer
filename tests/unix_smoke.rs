@@ -40,6 +40,16 @@ fn reads_a_well_known_sysctl_key() {
     assert!(!value.is_empty());
 }
 
+/// Needs internet access: TCP-connect probe to the default Frankfurt target.
+#[test]
+#[ignore]
+fn probes_the_default_target() {
+    use tibia_net_optimizer::network::probe::{parse_target, probe_once, DEFAULT_TARGET};
+    let target = parse_target(DEFAULT_TARGET).unwrap();
+    let rtt = probe_once(&target, std::time::Duration::from_secs(3)).expect("default target should answer");
+    println!("{DEFAULT_TARGET}: {rtt:?}");
+}
+
 #[test]
 #[ignore]
 fn startup_state_is_queryable() {

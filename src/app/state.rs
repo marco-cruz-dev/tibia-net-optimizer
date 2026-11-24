@@ -2,6 +2,8 @@
 
 use crate::actions::Action;
 use crate::config::Config;
+use crate::network::ping::LatencyStats;
+use crate::network::probe::parse_target;
 use crate::optimizer::heal_plan;
 use crate::platform::Os;
 use crate::report::StatusReport;
@@ -57,9 +59,24 @@ pub enum WorkerEvent {
     },
 }
 
+/// One latency probe result from the monitor thread.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PingSample {
+    /// Which monitor run produced it (stale samples are ignored).
+    pub generation: u64,
+    /// `None` = lost / timed out.
+    pub rtt: Option<std::time::Duration>,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Msg {
     Worker(WorkerEvent),
+    /// Latency monitor: target text edited, Start, Stop, sample received.
+    PingTargetEdited(String),
+    PingStart,
+    PingStop,
+    Ping(PingSample),
     Refresh,
     /// A button, toggle, checkbox or tray item asking to change the system.
     Request(Action),
@@ -88,7 +105,30 @@ pub enum Effect {
         title: String,
         body: String,
     },
+    /// Start (replacing any running) latency monitor for `target`.
+    StartPing {
+        target: String,
+        generation: u64,
+    },
+    StopPing,
     Quit,
+}
+
+/// Samples kept for stats and the sparkline (≈2 minutes at one per 2 s).
+pub const PING_WINDOW: usize = 60;
+
+/// Live latency monitor state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PingState {
+    /// Text in the target box (saved to config on Start).
+    pub target_input: String,
+    /// The user pressed Start (stays true while hidden in the tray).
+    pub running: bool,
+    /// A monitor thread is actually probing (running and window visible).
+    pub active: bool,
+    pub generation: u64,
+    pub stats: LatencyStats,
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,7 +163,7 @@ pub const RESTART_NOTICE: &str = "Restart as Administrator to change settings.";
 pub const APP_TITLE: &str = "Tibia Network Optimizer";
 pub const AUTO_HEAL_OFF_NOTE: &str = "Auto-heal was turned off so it won't undo your change.";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AppState {
     pub os: Os,
     pub elevated: bool,
@@ -141,12 +181,22 @@ pub struct AppState {
     pub skip_next_heal: bool,
     /// The current user action turned auto-heal off; mention it when done.
     pub auto_heal_turned_off: bool,
+    pub ping: PingState,
 }
 
 impl AppState {
     /// Initial state plus the effects to run at startup.
     pub fn new(os: Os, elevated: bool, config: Config, start_minimized: bool) -> (Self, Vec<Effect>) {
+        let ping = PingState {
+            target_input: config.ping_target.clone(),
+            running: false,
+            active: false,
+            generation: 0,
+            stats: LatencyStats::new(PING_WINDOW),
+            last_error: None,
+        };
         let state = AppState {
+            ping,
             os,
             elevated,
             config,
@@ -175,6 +225,19 @@ impl AppState {
     pub fn update(&mut self, msg: Msg) -> Vec<Effect> {
         match msg {
             Msg::Refresh => vec![self.refresh()],
+            Msg::PingTargetEdited(text) => {
+                self.ping.target_input = text;
+                vec![]
+            }
+            Msg::PingStart => self.ping_start(),
+            Msg::PingStop => {
+                self.ping.running = false;
+                self.sync_ping()
+            }
+            Msg::Ping(sample) => {
+                self.on_ping(sample);
+                vec![]
+            }
             Msg::Worker(WorkerEvent::Status(report)) => {
                 self.report = Some(report);
                 self.heal_effects()
@@ -240,12 +303,16 @@ impl AppState {
             Msg::SetMinimizeToTray(on) => self.set_flag(|c| &mut c.minimize_to_tray, on),
             Msg::ShowDashboard => {
                 self.window_visible = true;
-                vec![Effect::ShowWindow]
+                let mut effects = vec![Effect::ShowWindow];
+                effects.extend(self.sync_ping());
+                effects
             }
             Msg::CloseRequested => {
                 if self.config.minimize_to_tray {
                     self.window_visible = false;
-                    vec![Effect::HideWindow]
+                    let mut effects = vec![Effect::HideWindow];
+                    effects.extend(self.sync_ping());
+                    effects
                 } else {
                     vec![Effect::Quit]
                 }
@@ -256,6 +323,56 @@ impl AppState {
                 vec![]
             }
         }
+    }
+
+    /// Validates the target, remembers it, resets the stats and starts.
+    fn ping_start(&mut self) -> Vec<Effect> {
+        let input = self.ping.target_input.trim().to_string();
+        if let Err(e) = parse_target(&input) {
+            self.notice = Some(Notice::error(format!("Invalid ping target: {e}")));
+            return vec![];
+        }
+        let mut effects = Vec::new();
+        if self.config.ping_target != input {
+            self.config.ping_target = input.clone();
+            effects.push(Effect::SaveConfig);
+        }
+        self.ping.target_input = input;
+        self.ping.running = true;
+        self.ping.stats.clear();
+        self.ping.last_error = None;
+        // A Start while already probing restarts with the (new) target.
+        self.ping.active = false;
+        effects.extend(self.sync_ping());
+        effects
+    }
+
+    /// Probes run only while the user wants them *and* the window is visible.
+    fn sync_ping(&mut self) -> Vec<Effect> {
+        let wanted = self.ping.running && self.window_visible;
+        match (wanted, self.ping.active) {
+            (true, false) => {
+                self.ping.generation += 1;
+                self.ping.active = true;
+                vec![Effect::StartPing {
+                    target: self.config.ping_target.clone(),
+                    generation: self.ping.generation,
+                }]
+            }
+            (false, true) => {
+                self.ping.active = false;
+                vec![Effect::StopPing]
+            }
+            _ => vec![],
+        }
+    }
+
+    fn on_ping(&mut self, sample: PingSample) {
+        if !self.ping.active || sample.generation != self.ping.generation {
+            return; // from a stopped or replaced monitor
+        }
+        self.ping.stats.record(sample.rtt);
+        self.ping.last_error = sample.error;
     }
 
     /// After a status update: start a heal if auto-heal applies.
@@ -698,6 +815,121 @@ mod tests {
         assert!(s.config.auto_heal);
         s.update(finished(Action::ApplyAll, Ok(()), None));
         assert_eq!(s.notice, Some(Notice::info("Optimizations applied.")));
+    }
+
+    // --- latency monitor ---------------------------------------------------
+
+    fn sample(generation: u64, ms: Option<u64>) -> Msg {
+        Msg::Ping(PingSample {
+            generation,
+            rtt: ms.map(std::time::Duration::from_millis),
+            error: ms.is_none().then(|| "timed out".to_string()),
+        })
+    }
+
+    #[test]
+    fn ping_starts_with_saved_target_and_new_generation() {
+        let mut s = state(Os::Windows, false);
+        assert_eq!(s.ping.target_input, crate::config::DEFAULT_PING_TARGET);
+        s.update(Msg::PingTargetEdited(" 1.2.3.4:7172 ".into()));
+        assert_eq!(
+            s.update(Msg::PingStart),
+            vec![
+                Effect::SaveConfig,
+                Effect::StartPing {
+                    target: "1.2.3.4:7172".into(),
+                    generation: 1
+                }
+            ]
+        );
+        assert_eq!(s.config.ping_target, "1.2.3.4:7172");
+        assert!(s.ping.running && s.ping.active);
+    }
+
+    #[test]
+    fn ping_start_with_unchanged_target_does_not_save() {
+        let mut s = state(Os::Windows, false);
+        assert_eq!(
+            s.update(Msg::PingStart),
+            vec![Effect::StartPing {
+                target: crate::config::DEFAULT_PING_TARGET.into(),
+                generation: 1
+            }]
+        );
+    }
+
+    #[test]
+    fn invalid_target_is_rejected_with_a_notice() {
+        let mut s = state(Os::Windows, false);
+        s.update(Msg::PingTargetEdited("host:abc".into()));
+        assert!(s.update(Msg::PingStart).is_empty());
+        assert!(!s.ping.running);
+        let notice = s.notice.clone().unwrap();
+        assert_eq!(notice.kind, NoticeKind::Error);
+        assert!(notice.text.starts_with("Invalid ping target"), "{}", notice.text);
+    }
+
+    #[test]
+    fn samples_feed_stats_and_stale_ones_are_ignored() {
+        let mut s = state(Os::Windows, false);
+        s.update(Msg::PingStart);
+        s.update(sample(1, Some(50)));
+        s.update(sample(1, None));
+        s.update(sample(0, Some(999))); // from an older run
+        assert_eq!(s.ping.stats.samples_ms(), vec![Some(50.0), None]);
+        assert_eq!(s.ping.last_error.as_deref(), Some("timed out"));
+        s.update(sample(1, Some(52)));
+        assert_eq!(s.ping.last_error, None, "cleared by a success");
+    }
+
+    #[test]
+    fn restart_resets_stats() {
+        let mut s = state(Os::Windows, false);
+        s.update(Msg::PingStart);
+        s.update(sample(1, Some(50)));
+        s.update(Msg::PingStop);
+        s.update(Msg::PingStart);
+        assert!(s.ping.stats.is_empty());
+        assert_eq!(s.ping.generation, 2);
+    }
+
+    #[test]
+    fn stop_stops_the_monitor() {
+        let mut s = state(Os::Windows, false);
+        s.update(Msg::PingStart);
+        assert_eq!(s.update(Msg::PingStop), vec![Effect::StopPing]);
+        assert!(!s.ping.running && !s.ping.active);
+        assert!(s.update(Msg::PingStop).is_empty(), "already stopped");
+        s.update(sample(1, Some(50)));
+        assert!(s.ping.stats.is_empty(), "samples after stop are ignored");
+    }
+
+    #[test]
+    fn hiding_to_tray_pauses_and_showing_resumes() {
+        let mut s = state(Os::Windows, false);
+        s.update(Msg::PingStart);
+        assert_eq!(
+            s.update(Msg::CloseRequested),
+            vec![Effect::HideWindow, Effect::StopPing]
+        );
+        assert!(s.ping.running && !s.ping.active, "still wanted, just paused");
+        assert_eq!(
+            s.update(Msg::ShowDashboard),
+            vec![
+                Effect::ShowWindow,
+                Effect::StartPing {
+                    target: crate::config::DEFAULT_PING_TARGET.into(),
+                    generation: 2
+                }
+            ]
+        );
+    }
+
+    #[test]
+    fn starting_while_hidden_waits_for_the_window() {
+        let mut s = AppState::new(Os::Windows, false, Config::default(), true).0;
+        assert!(s.update(Msg::PingStart).is_empty());
+        assert!(s.ping.running && !s.ping.active);
     }
 
     #[test]

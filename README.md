@@ -5,8 +5,8 @@ that **Tibia** stops dropping inputs, losing spell casts and rubber-banding on
 distant servers (for example Secura in Frankfurt played from Portugal), even
 when ping looks fine. It runs on **Windows**, **Linux** and **macOS**.
 
-> **Status: Sprint 5 of 7 done.** The app has a tray icon, dashboard, auto-heal with desktop notifications, and a full CLI,
-> on all three OSes. Next is the live ping/jitter monitor. See [docs/BACKLOG.md](docs/BACKLOG.md).
+> **Status: Sprint 6 of 7 done.** The app has a tray icon, dashboard, auto-heal with desktop notifications, a live
+> ping/jitter monitor, and a full CLI, on all three OSes. Next is release packaging. See [docs/BACKLOG.md](docs/BACKLOG.md).
 
 ## Why
 
@@ -41,7 +41,7 @@ recorded and restored.
 - [x] **Dashboard + system tray**: a colour-coded tray icon (green/red/amber), a status banner, a card per setting with a toggle and explanation, Optimize Now / Revert, and automation checkboxes. Closing the window minimizes it to the tray.
 - [x] **Auto-heal**: re-checks every 60 s (also from the tray) and re-applies anything the OS reset, with a desktop notification. It never undoes your own Revert: reverting turns auto-heal off. It needs admin rights, so on Windows use 'Run at startup' to have the app start elevated.
 - [x] Under sudo/pkexec, settings stay in your own config folder.
-- [ ] Live ping and jitter monitor for Secura/Frankfurt (Sprint 6).
+- [x] **Live connection monitor**: current ping, average, **jitter** (what makes steps stutter) and packet loss, with a sparkline. The default target is a Frankfurt test server (`fra-de-ping.vultr.com`, near Secura); enter any host, or `host:port` for a TCP probe. It uses ICMP on Windows (no admin needed) and TCP elsewhere, and only runs while the window is open.
 
 ## Usage
 

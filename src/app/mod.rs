@@ -9,6 +9,7 @@
 //! clicks into [`state::Msg`]s.
 
 pub mod icon;
+pub mod ping;
 pub mod state;
 pub mod view;
 pub mod worker;

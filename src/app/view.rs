@@ -1,6 +1,7 @@
 //! View model: everything the window and tray display, derived from state.
 
 use super::state::{AppState, Notice, Route};
+use crate::network::probe::{method_for, parse_target};
 use crate::tweak::{TweakId, TweakState};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -67,6 +68,85 @@ pub struct TrayView {
     pub status_text: &'static str,
     pub tone: Tone,
     pub tooltip: String,
+}
+
+/// The "Live Connection Monitor" section.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PingView {
+    pub target_input: String,
+    pub running: bool,
+    /// "Start" or "Stop".
+    pub button: &'static str,
+    /// How the target will be probed, e.g. "ICMP" / "TCP :7172" / "invalid target".
+    pub method: String,
+    pub current: String,
+    pub average: String,
+    pub jitter: String,
+    pub jitter_tone: Tone,
+    pub loss: String,
+    pub loss_tone: Tone,
+    /// Oldest-first RTTs in ms for the sparkline (`None` = lost).
+    pub points: Vec<Option<f64>>,
+    pub error: Option<String>,
+    /// Running but paused because the window is hidden.
+    pub paused: bool,
+}
+
+/// Jitter is what makes steps stutter: under 5 ms is smooth, 5–15 ms is
+/// noticeable, and above that it hurts.
+pub fn jitter_tone(jitter_ms: Option<f64>) -> Tone {
+    match jitter_ms {
+        None => Tone::Neutral,
+        Some(j) if j < 5.0 => Tone::Good,
+        Some(j) if j < 15.0 => Tone::Warn,
+        Some(_) => Tone::Bad,
+    }
+}
+
+/// Any sustained loss drops inputs: 0% good, up to 2% warning, above bad.
+pub fn loss_tone(loss_pct: f64, has_samples: bool) -> Tone {
+    if !has_samples {
+        Tone::Neutral
+    } else if loss_pct <= 0.0 {
+        Tone::Good
+    } else if loss_pct <= 2.0 {
+        Tone::Warn
+    } else {
+        Tone::Bad
+    }
+}
+
+const DASH: &str = "—";
+
+impl PingView {
+    pub fn from_state(s: &AppState) -> PingView {
+        let p = &s.ping;
+        let stats = &p.stats;
+        let ms = |v: Option<f64>| v.map_or_else(|| DASH.to_string(), |x| format!("{x:.0} ms"));
+        let method = parse_target(&p.target_input)
+            .map(|t| method_for(&t, s.os).label())
+            .unwrap_or_else(|_| "invalid target".into());
+        let jitter = stats.jitter_ms();
+        PingView {
+            target_input: p.target_input.clone(),
+            running: p.running,
+            button: if p.running { "Stop" } else { "Start" },
+            method,
+            current: ms(stats.current_ms()),
+            average: ms(stats.average_ms()),
+            jitter: jitter.map_or_else(|| DASH.to_string(), |j| format!("{j:.1} ms")),
+            jitter_tone: jitter_tone(jitter),
+            loss: if stats.is_empty() {
+                DASH.to_string()
+            } else {
+                format!("{:.0}%", stats.packet_loss_pct())
+            },
+            loss_tone: loss_tone(stats.packet_loss_pct(), !stats.is_empty()),
+            points: stats.samples_ms(),
+            error: p.last_error.clone(),
+            paused: p.running && !p.active,
+        }
+    }
 }
 
 pub const BANNER_CHECKING: &str = "Checking current settings...";
@@ -433,6 +513,85 @@ mod tests {
         assert_eq!(hint(Os::Macos, false, true), Some(AUTO_HEAL_HINT_UNIX));
         assert_eq!(hint(Os::Windows, true, true), None, "elevated: it works");
         assert_eq!(hint(Os::Windows, false, false), None, "off: nothing to explain");
+    }
+
+    // --- latency monitor ---------------------------------------------------
+
+    use crate::app::state::{Msg, PingSample};
+
+    fn feed(s: &mut AppState, samples: &[Option<u64>]) {
+        for ms in samples {
+            s.update(Msg::Ping(PingSample {
+                generation: s.ping.generation,
+                rtt: ms.map(std::time::Duration::from_millis),
+                error: ms.is_none().then(|| "timed out".to_string()),
+            }));
+        }
+    }
+
+    #[test]
+    fn idle_monitor_shows_dashes_and_start() {
+        let s = AppState::new(Os::Windows, false, Config::default(), false).0;
+        let v = PingView::from_state(&s);
+        assert_eq!(v.button, "Start");
+        assert!(!v.running && !v.paused);
+        assert_eq!(v.method, "ICMP");
+        assert_eq!(
+            (
+                v.current.as_str(),
+                v.average.as_str(),
+                v.jitter.as_str(),
+                v.loss.as_str()
+            ),
+            ("—", "—", "—", "—")
+        );
+        assert_eq!((v.jitter_tone, v.loss_tone), (Tone::Neutral, Tone::Neutral));
+        assert!(v.points.is_empty());
+    }
+
+    #[test]
+    fn running_monitor_formats_stats() {
+        let mut s = AppState::new(Os::Windows, false, Config::default(), false).0;
+        s.update(Msg::PingStart);
+        feed(&mut s, &[Some(50), Some(54), None, Some(52)]);
+        let v = PingView::from_state(&s);
+        assert_eq!(v.button, "Stop");
+        assert_eq!(v.current, "52 ms");
+        assert_eq!(v.average, "52 ms");
+        assert_eq!(v.jitter, "3.0 ms"); // |54-50| + |52-54| = 6 / 2
+        assert_eq!(v.loss, "25%");
+        assert_eq!(v.points, vec![Some(50.0), Some(54.0), None, Some(52.0)]);
+        assert_eq!(v.error, None, "last probe succeeded");
+    }
+
+    #[test]
+    fn method_follows_target_and_os() {
+        let mut s = AppState::new(Os::Linux, false, Config::default(), false).0;
+        assert_eq!(PingView::from_state(&s).method, "TCP :443");
+        s.update(Msg::PingTargetEdited("1.2.3.4:7172".into()));
+        assert_eq!(PingView::from_state(&s).method, "TCP :7172");
+        s.update(Msg::PingTargetEdited("bad:port".into()));
+        assert_eq!(PingView::from_state(&s).method, "invalid target");
+    }
+
+    #[test]
+    fn paused_while_hidden() {
+        let mut s = AppState::new(Os::Windows, false, Config::default(), false).0;
+        s.update(Msg::PingStart);
+        s.update(Msg::CloseRequested);
+        assert!(PingView::from_state(&s).paused);
+    }
+
+    #[test]
+    fn ping_tones() {
+        assert_eq!(jitter_tone(None), Tone::Neutral);
+        assert_eq!(jitter_tone(Some(2.0)), Tone::Good);
+        assert_eq!(jitter_tone(Some(5.0)), Tone::Warn);
+        assert_eq!(jitter_tone(Some(15.0)), Tone::Bad);
+        assert_eq!(loss_tone(0.0, false), Tone::Neutral);
+        assert_eq!(loss_tone(0.0, true), Tone::Good);
+        assert_eq!(loss_tone(2.0, true), Tone::Warn);
+        assert_eq!(loss_tone(2.5, true), Tone::Bad);
     }
 
     #[test]

@@ -8,7 +8,9 @@ use serde::{Deserialize, Serialize};
 use crate::platform::Os;
 use crate::Result;
 
-pub const DEFAULT_PING_TARGET: &str = "secura.tibia.com";
+pub const DEFAULT_PING_TARGET: &str = crate::network::probe::DEFAULT_TARGET;
+/// The original spec's default; it has no DNS record, so saved configs are migrated.
+const LEGACY_PING_TARGET: &str = "secura.tibia.com";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default)]
@@ -55,8 +57,18 @@ impl Config {
     pub fn load(path: &Path) -> Config {
         fs::read_to_string(path)
             .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
+            .and_then(|s| serde_json::from_str::<Config>(&s).ok())
             .unwrap_or_default()
+            .migrate()
+    }
+
+    /// Upgrades values from older versions.
+    fn migrate(mut self) -> Config {
+        let target = self.ping_target.trim();
+        if target.is_empty() || target == LEGACY_PING_TARGET {
+            self.ping_target = DEFAULT_PING_TARGET.to_string();
+        }
+        self
     }
 
     /// Writes settings, creating the parent directory if needed.
@@ -281,6 +293,21 @@ mod tests {
             Some(PathBuf::from(appdata).join("TibiaNetOptimizer")),
             "Windows has no sudo"
         );
+    }
+
+    #[test]
+    fn default_ping_target_is_the_frankfurt_endpoint() {
+        assert_eq!(Config::default().ping_target, "fra-de-ping.vultr.com");
+    }
+
+    #[test]
+    fn legacy_ping_target_is_migrated_and_custom_ones_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(&path, r#"{ "ping_target": "secura.tibia.com" }"#).unwrap();
+        assert_eq!(Config::load(&path).ping_target, DEFAULT_PING_TARGET);
+        fs::write(&path, r#"{ "ping_target": "1.2.3.4:7172" }"#).unwrap();
+        assert_eq!(Config::load(&path).ping_target, "1.2.3.4:7172");
     }
 
     #[test]

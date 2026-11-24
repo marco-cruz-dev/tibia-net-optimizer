@@ -5,6 +5,8 @@
 
 #![cfg(windows)]
 
+use std::time::Duration;
+
 use tibia_net_optimizer::network::adapters::AdapterSource;
 use tibia_net_optimizer::network::autotuning;
 use tibia_net_optimizer::network::iphelper::WindowsAdapterSource;
@@ -86,6 +88,24 @@ fn shows_a_toast() {
         "Test notification from the smoke tests - you can dismiss it.",
     )
     .expect("toast should be shown");
+}
+
+#[test]
+#[ignore]
+fn icmp_echo_to_loopback() {
+    let rtt = tibia_net_optimizer::network::icmp::echo(std::net::Ipv4Addr::LOCALHOST, Duration::from_secs(1))
+        .expect("loopback should answer ICMP");
+    assert!(rtt < Duration::from_secs(1));
+}
+
+/// Needs internet access: probes the default Frankfurt target.
+#[test]
+#[ignore]
+fn probes_the_default_target() {
+    use tibia_net_optimizer::network::probe::{parse_target, probe_once, DEFAULT_TARGET};
+    let target = parse_target(DEFAULT_TARGET).unwrap();
+    let rtt = probe_once(&target, Duration::from_secs(2)).expect("default target should answer");
+    println!("{DEFAULT_TARGET}: {rtt:?}");
 }
 
 #[test]
