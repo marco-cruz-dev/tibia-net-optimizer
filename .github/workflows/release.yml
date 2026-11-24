@@ -94,7 +94,8 @@ jobs:
       - name: Release notes from CHANGELOG.md
         run: |
           version="${GITHUB_REF_NAME#v}"
-          awk -v v="$version" '$0 ~ "^## \\[" v "\\]" {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md > notes.md
+          # Plain prefix match (no regex escaping): the "## [x.y.z]" section up to the next "## ".
+          awk -v h="## [$version]" 'index($0, h) == 1 {f=1; next} /^## / {f=0} f' CHANGELOG.md > notes.md
           test -s notes.md || { echo "No CHANGELOG.md section for $version"; exit 1; }
           cat notes.md
       - name: Publish GitHub Release
