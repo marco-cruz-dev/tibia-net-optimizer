@@ -9,10 +9,12 @@
 //! - Real Windows implementations ("adapters") are thin and covered by
 //!   `#[ignore]`d smoke tests in `tests/`.
 
+pub mod cli;
 pub mod config;
 pub mod error;
 pub mod network;
 pub mod optimizer;
+pub mod report;
 pub mod system;
 
 pub use error::{Error, Result};

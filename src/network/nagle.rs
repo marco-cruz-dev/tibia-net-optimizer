@@ -3,6 +3,7 @@
 
 use std::net::Ipv4Addr;
 
+use super::adapters::{detect_active, AdapterSource};
 use super::ipv4::parse_usable_ipv4;
 use crate::Result;
 
@@ -47,10 +48,12 @@ pub trait InterfaceRegistry {
     fn delete_value(&self, guid: &str, name: &str) -> Result<()>;
 }
 
-/// An interface with a usable IPv4 address (what the UI shows).
+/// A connected interface with a usable IPv4 address (what the UI shows).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveAdapter {
     pub guid: String,
+    /// OS friendly name ("Ethernet"), when OS adapter info is available.
+    pub name: Option<String>,
     pub ipv4: Ipv4Addr,
     pub optimized: bool,
 }
@@ -65,18 +68,12 @@ pub enum NagleStatus {
     NoActiveAdapter,
 }
 
-pub fn active_adapters(reg: &impl InterfaceRegistry) -> Result<Vec<ActiveAdapter>> {
-    Ok(reg
-        .interfaces()?
-        .into_iter()
-        .filter_map(|i| {
-            i.active_ipv4().map(|ipv4| ActiveAdapter {
-                optimized: i.is_optimized(),
-                guid: i.guid,
-                ipv4,
-            })
-        })
-        .collect())
+/// Registry interfaces that are really connected. If the OS adapter list
+/// can't be read, falls back to registry-only detection.
+pub fn active_adapters(reg: &impl InterfaceRegistry, os: &impl AdapterSource) -> Result<Vec<ActiveAdapter>> {
+    let snapshots = reg.interfaces()?;
+    let live = os.adapters().ok();
+    Ok(detect_active(snapshots, live.as_deref()))
 }
 
 pub fn status_of(adapters: &[ActiveAdapter]) -> NagleStatus {
@@ -91,9 +88,9 @@ pub fn status_of(adapters: &[ActiveAdapter]) -> NagleStatus {
 
 /// Sets `TcpAckFrequency=1` and `TCPNoDelay=1` on every active adapter that
 /// isn't already optimized. Returns the GUIDs that were patched.
-pub fn apply(reg: &impl InterfaceRegistry) -> Result<Vec<String>> {
+pub fn apply(reg: &impl InterfaceRegistry, os: &impl AdapterSource) -> Result<Vec<String>> {
     let mut patched = Vec::new();
-    for adapter in active_adapters(reg)?.into_iter().filter(|a| !a.optimized) {
+    for adapter in active_adapters(reg, os)?.into_iter().filter(|a| !a.optimized) {
         reg.set_dword(&adapter.guid, TCP_ACK_FREQUENCY, 1)?;
         reg.set_dword(&adapter.guid, TCP_NO_DELAY, 1)?;
         patched.push(adapter.guid);
@@ -116,6 +113,7 @@ pub fn revert(reg: &impl InterfaceRegistry) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::network::adapters::OsAdapter;
     use std::cell::RefCell;
 
     /// In-memory registry fake.
@@ -152,6 +150,21 @@ mod tests {
                 other => panic!("unexpected value {other}"),
             });
             Ok(())
+        }
+    }
+
+    /// OS adapter info unavailable → registry-only fallback.
+    struct NoOsInfo;
+    impl AdapterSource for NoOsInfo {
+        fn adapters(&self) -> Result<Vec<OsAdapter>> {
+            Err(crate::Error::Parse("no OS info in this test".into()))
+        }
+    }
+
+    struct LiveOs(Vec<OsAdapter>);
+    impl AdapterSource for LiveOs {
+        fn adapters(&self) -> Result<Vec<OsAdapter>> {
+            Ok(self.0.clone())
         }
     }
 
@@ -213,7 +226,7 @@ mod tests {
             guid: "{X}".into(),
             ..Default::default()
         }]);
-        let adapters = active_adapters(&reg).unwrap();
+        let adapters = active_adapters(&reg, &NoOsInfo).unwrap();
         assert!(adapters.is_empty());
         assert_eq!(status_of(&adapters), NagleStatus::NoActiveAdapter);
     }
@@ -226,12 +239,15 @@ mod tests {
             dhcp("{Idle}", "0.0.0.0"), // inactive: ignored
         ]);
         assert_eq!(
-            status_of(&active_adapters(&reg).unwrap()),
+            status_of(&active_adapters(&reg, &NoOsInfo).unwrap()),
             NagleStatus::NotOptimized
         );
 
         reg.with("{B}", |i| *i = optimized(i.clone()));
-        assert_eq!(status_of(&active_adapters(&reg).unwrap()), NagleStatus::Optimized);
+        assert_eq!(
+            status_of(&active_adapters(&reg, &NoOsInfo).unwrap()),
+            NagleStatus::Optimized
+        );
     }
 
     // --- apply / revert ----------------------------------------------------
@@ -243,17 +259,40 @@ mod tests {
             dhcp("{Todo}", "10.0.0.2"),
             dhcp("{Idle}", "0.0.0.0"),
         ]);
-        let patched = apply(&reg).unwrap();
+        let patched = apply(&reg, &NoOsInfo).unwrap();
         assert_eq!(patched, vec!["{Todo}".to_string()]);
         assert!(reg.get("{Todo}").is_optimized());
         assert_eq!(reg.get("{Idle}").tcp_no_delay, None);
     }
 
     #[test]
+    fn apply_skips_adapters_the_os_reports_as_down() {
+        let reg = FakeRegistry::new(vec![dhcp("{Up}", "10.0.0.2"), dhcp("{Down}", "10.0.0.3")]);
+        let os = LiveOs(vec![
+            OsAdapter {
+                guid: "{Up}".into(),
+                friendly_name: "Ethernet".into(),
+                is_up: true,
+                if_type: 6,
+                ipv4: vec![Ipv4Addr::new(10, 0, 0, 2)],
+            },
+            OsAdapter {
+                guid: "{Down}".into(),
+                friendly_name: "Wi-Fi".into(),
+                is_up: false,
+                if_type: 71,
+                ipv4: vec![],
+            },
+        ]);
+        assert_eq!(apply(&reg, &os).unwrap(), vec!["{Up}".to_string()]);
+        assert_eq!(reg.get("{Down}").tcp_no_delay, None);
+    }
+
+    #[test]
     fn apply_is_idempotent() {
         let reg = FakeRegistry::new(vec![dhcp("{A}", "10.0.0.2")]);
-        apply(&reg).unwrap();
-        assert!(apply(&reg).unwrap().is_empty());
+        apply(&reg, &NoOsInfo).unwrap();
+        assert!(apply(&reg, &NoOsInfo).unwrap().is_empty());
     }
 
     #[test]

@@ -21,6 +21,9 @@ pub struct Config {
     pub ping_target: String,
     /// Background drift-check interval.
     pub check_interval_secs: u64,
+    /// Unix seconds of the last auto-tuning change made by this app; used to
+    /// recommend a reboot until the machine has restarted.
+    pub autotuning_changed_at: Option<u64>,
 }
 
 impl Default for Config {
@@ -30,6 +33,7 @@ impl Default for Config {
             minimize_to_tray: true,
             ping_target: DEFAULT_PING_TARGET.to_string(),
             check_interval_secs: 60,
+            autotuning_changed_at: None,
         }
     }
 }
@@ -71,6 +75,7 @@ mod tests {
         assert!(c.minimize_to_tray);
         assert_eq!(c.ping_target, DEFAULT_PING_TARGET);
         assert_eq!(c.check_interval_secs, 60);
+        assert_eq!(c.autotuning_changed_at, None);
     }
 
     #[test]
@@ -82,6 +87,7 @@ mod tests {
             minimize_to_tray: false,
             ping_target: "1.1.1.1".into(),
             check_interval_secs: 30,
+            autotuning_changed_at: Some(1_764_000_000),
         };
         c.save(&path).unwrap();
         assert_eq!(Config::load(&path), c);

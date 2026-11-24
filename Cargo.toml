@@ -2,7 +2,7 @@
 name = "tibia-net-optimizer"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.80"
+rust-version = "1.82"
 license = "GPL-3.0-only"
 description = "Windows tray utility that tunes TCP settings (auto-tuning, Nagle) for low-latency Tibia play"
 readme = "README.md"
@@ -16,6 +16,19 @@ serde_json = "1.0"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.52"
+# Raw Win32 bindings (lighter than the `windows` crate suggested in the spec).
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [dev-dependencies]
 tempfile = "3"

@@ -3,6 +3,7 @@
 use std::io;
 use std::process::Command;
 
+use super::encoding::decode_console_output;
 use crate::{Error, Result};
 
 /// Captured result of running an external program.
@@ -61,8 +62,8 @@ impl CommandRunner for SystemCommandRunner {
         // keywords intact, which is all the parsers rely on.
         Ok(CommandOutput {
             success: out.status.success(),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+            stdout: decode_console_output(&out.stdout),
+            stderr: decode_console_output(&out.stderr),
         })
     }
 }

@@ -1,5 +1,7 @@
-//! OS integration: running external commands and Task Scheduler startup.
-//! Elevation checks (`elevation.rs`) arrive in Sprint 2.
+//! OS integration: external commands, elevation, boot time, startup task.
 
+pub mod boot;
 pub mod command;
+pub mod elevation;
+pub mod encoding;
 pub mod startup;

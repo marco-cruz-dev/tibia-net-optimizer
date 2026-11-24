@@ -30,6 +30,18 @@ impl AutoTuningLevel {
         }
     }
 
+    /// The netsh keyword (`disabled`, `normal`, ...), or the raw text for `Other`.
+    pub fn keyword(&self) -> &str {
+        match self {
+            Self::Disabled => "disabled",
+            Self::HighlyRestricted => "highlyrestricted",
+            Self::Restricted => "restricted",
+            Self::Normal => "normal",
+            Self::Experimental => "experimental",
+            Self::Other(s) => s,
+        }
+    }
+
     /// Tibia-optimal setting is `disabled`.
     pub fn is_optimized(&self) -> bool {
         matches!(self, Self::Disabled)
@@ -145,6 +157,20 @@ Capacidade ECN                       : disabled\r\n";
             AutoTuningLevel::from_keyword("weird"),
             AutoTuningLevel::Other("weird".into())
         );
+    }
+
+    #[test]
+    fn keyword_roundtrips_through_from_keyword() {
+        for kw in [
+            "disabled",
+            "highlyrestricted",
+            "restricted",
+            "normal",
+            "experimental",
+            "weird",
+        ] {
+            assert_eq!(AutoTuningLevel::from_keyword(kw).keyword(), kw);
+        }
     }
 
     #[test]

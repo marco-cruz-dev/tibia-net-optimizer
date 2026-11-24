@@ -8,8 +8,12 @@ use std::net::Ipv4Addr;
 /// meaning DHCP failed) and broadcast.
 pub fn parse_usable_ipv4(s: &str) -> Option<Ipv4Addr> {
     let ip: Ipv4Addr = s.trim().parse().ok()?;
-    let unusable = ip.is_unspecified() || ip.is_loopback() || ip.is_link_local() || ip.is_broadcast();
-    (!unusable).then_some(ip)
+    is_usable_ipv4(ip).then_some(ip)
+}
+
+/// See [`parse_usable_ipv4`] for what counts as usable.
+pub fn is_usable_ipv4(ip: Ipv4Addr) -> bool {
+    !(ip.is_unspecified() || ip.is_loopback() || ip.is_link_local() || ip.is_broadcast())
 }
 
 #[cfg(test)]
