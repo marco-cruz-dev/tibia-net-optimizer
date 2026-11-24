@@ -247,7 +247,7 @@ Known limitations:
 - `IcmpSendEcho` has 1 ms resolution, which is fine for jitter at this scale.
 - Linux needs `ping` (iputils) and macOS `lsof`. Both are present by default.
 
-## Sprint 7 — Release ✅ (release workflow: dry run pending)
+## Sprint 7 — Release ✅ (v0.1.0 published 2026-11-24)
 
 Done test-first (11 tests run red, then green). The suite grew from 264 to
 275 unit tests.
@@ -257,7 +257,7 @@ Done test-first (11 tests run red, then green). The suite grew from 264 to
 | S7-1 | **ICO from the shield.** | ✅ The rasterizer moved to the dependency-free `app/icon_raster.rs`, shared by the app and `build.rs`. ICO writer: 32-bit BMP entries at 16/24/32/48/64/256 px. Header, directory, BMP header, BGRA order, bottom-up rows and AND-mask size are unit-tested. |
 | S7-2 | **Windows resources.** | ✅ `build.rs` (Windows targets only; cross-checks skip it) embeds the icon, the manifest (`asInvoker`, PerMonitorV2, Windows 10/11, Common Controls v6, deliberately no `activeCodePage`) and version info via `winresource`. Verified: Explorer extracts the shield from the exe, and the version info and manifest are present. |
 | S7-3 | **No console flash; two binaries.** | ✅ `tibia-net-optimizer.exe` is a GUI-subsystem program (PE subsystem 2). With CLI arguments it attaches to the parent terminal (piped output verified). **`tno.exe`** (subsystem 3) is the CLI; with no arguments it prints the status. `startup on` always registers the dashboard exe, and `--elevate` always relaunches `tno` (path logic unit-tested). Hints now say `tno apply`. |
-| S7-4 | **Release workflow** (`.github/workflows/release.yml`). | ✅ Written: a tag `v*` builds Windows x86_64 (zip), Linux x86_64 (tar.gz) and macOS universal (`lipo`, tar.gz), each with both binaries, README, LICENSE and CHANGELOG, then publishes a GitHub Release with `SHA256SUMS.txt` and notes taken from `CHANGELOG.md`. A manual run is a dry run (artifacts only). ⏳ Not run yet; it needs a push. |
+| S7-4 | **Release workflow** (`.github/workflows/release.yml`). | ✅ Written: a tag `v*` builds Windows x86_64 (zip), Linux x86_64 (tar.gz) and macOS universal (`lipo`, tar.gz), each with both binaries, README, LICENSE and CHANGELOG, then publishes a GitHub Release with `SHA256SUMS.txt` and notes taken from `CHANGELOG.md`. A manual run is a dry run (artifacts only). ✅ Dry run green. The dry run's tag-path check found and fixed empty release notes (awk escaping). **v0.1.0 released**: https://github.com/marco-cruz-dev/TibiaNetOptimizer/releases/tag/v0.1.0. The first tag run lost its macOS job to GitHub runner capacity and was re-run; the Windows asset checksum was verified. |
 | S7-5 | **Docs.** | ✅ `CHANGELOG.md` (0.1.0), README Install section (two programs, unsigned-binary notes), sizes (6 MB dashboard, 0.65 MB `tno`). |
 
 Known limitations / follow-ups:
