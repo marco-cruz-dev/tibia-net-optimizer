@@ -150,6 +150,11 @@ mod tests {
             }
             other => panic!("unexpected {other:?}"),
         }
+        // notify() runs right after the event is sent, so give it a moment.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while notified.load(Ordering::SeqCst) == 0 && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
         assert_eq!(notified.load(Ordering::SeqCst), 1);
     }
 
