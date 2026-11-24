@@ -70,8 +70,13 @@ pub fn is_elevated() -> bool {
     }
 }
 
-/// Non-Windows elevation lands in Sprint 3 (`geteuid() == 0`).
-#[cfg(not(windows))]
+/// `true` when running as root.
+#[cfg(unix)]
+pub fn is_elevated() -> bool {
+    crate::unix::elevate::is_root()
+}
+
+#[cfg(not(any(windows, unix)))]
 pub fn is_elevated() -> bool {
     false
 }
@@ -114,10 +119,34 @@ pub fn relaunch_elevated(args: &[String]) -> crate::Result<()> {
     }
 }
 
-#[cfg(not(windows))]
+/// Re-runs the current executable as root (`sudo` in a terminal, otherwise
+/// `pkexec` / an AppleScript admin prompt) and waits for it to finish.
+#[cfg(unix)]
+pub fn relaunch_elevated(args: &[String]) -> crate::Result<()> {
+    use std::io::IsTerminal;
+
+    let exe = std::env::current_exe()?;
+    let (program, argv) = crate::unix::elevate::elevation_command(
+        crate::platform::Os::current(),
+        &exe.to_string_lossy(),
+        args,
+        std::io::stdin().is_terminal(),
+    );
+    let status = std::process::Command::new(&program).args(&argv).status()?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(crate::Error::CommandFailed {
+            program,
+            message: format!("elevated run exited with {status}"),
+        })
+    }
+}
+
+#[cfg(not(any(windows, unix)))]
 pub fn relaunch_elevated(_args: &[String]) -> crate::Result<()> {
     Err(crate::Error::Io(std::io::Error::other(
-        "elevated relaunch is not supported on this platform yet",
+        "elevated relaunch is not supported on this platform",
     )))
 }
 

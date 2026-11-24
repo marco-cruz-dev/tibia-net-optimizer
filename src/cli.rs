@@ -45,12 +45,13 @@ Usage: tibia-net-optimizer [COMMAND] [OPTIONS]
 
 Commands:
   status [--json]          Show current optimization state (default, read-only)
-  apply                    Disable auto-tuning and Nagle on active adapters (admin)
-  revert                   Restore Windows defaults (admin)
-  startup [on|off|status]  Run elevated at logon via Task Scheduler (admin for on/off)
+  apply                    Apply all optimizations for this OS (admin/root)
+  revert                   Restore the OS defaults (admin/root)
+  startup [on|off|status]  Re-apply automatically at boot/logon (admin/root for on/off)
+                           Windows: Task Scheduler, Linux: systemd, macOS: launchd
 
 Options:
-  --elevate                Relaunch as Administrator (UAC prompt) if needed
+  --elevate                Relaunch with admin rights (UAC / sudo / pkexec) if needed
   --pause                  Wait for Enter before exiting
   -h, --help               Show this help";
 
@@ -105,10 +106,12 @@ where
 }
 
 /// Arguments for the elevated child: same command, without `--elevate`
-/// (no relaunch loop) and with `--pause` (so its console output stays visible).
-pub fn relaunch_args(args: &[String]) -> Vec<String> {
+/// (no relaunch loop). With `add_pause` (Windows, where UAC opens a new
+/// console window) `--pause` is added so the output stays visible; on Unix
+/// `sudo` runs the child in the same terminal.
+pub fn relaunch_args(args: &[String], add_pause: bool) -> Vec<String> {
     let mut out: Vec<String> = args.iter().filter(|a| *a != "--elevate").cloned().collect();
-    if !out.iter().any(|a| a == "--pause") {
+    if add_pause && !out.iter().any(|a| a == "--pause") {
         out.push("--pause".into());
     }
     out
@@ -203,8 +206,14 @@ mod tests {
     #[test]
     fn relaunch_args_drop_elevate_and_add_pause_once() {
         let args: Vec<String> = ["apply", "--elevate"].map(String::from).to_vec();
-        assert_eq!(relaunch_args(&args), vec!["apply", "--pause"]);
+        assert_eq!(relaunch_args(&args, true), vec!["apply", "--pause"]);
         let args: Vec<String> = ["--pause", "revert", "--elevate"].map(String::from).to_vec();
-        assert_eq!(relaunch_args(&args), vec!["--pause", "revert"]);
+        assert_eq!(relaunch_args(&args, true), vec!["--pause", "revert"]);
+    }
+
+    #[test]
+    fn unix_relaunch_args_do_not_add_pause() {
+        let args: Vec<String> = ["apply", "--elevate"].map(String::from).to_vec();
+        assert_eq!(relaunch_args(&args, false), vec!["apply"]);
     }
 }

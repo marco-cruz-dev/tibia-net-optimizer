@@ -47,7 +47,15 @@ Not verified automatically (it changes the system or opens a UAC prompt):
 `apply`/`revert` as admin, `startup on/off` and `--elevate`. These go on the
 manual QA checklist.
 
-## Sprint 3 — Cross-platform core: Linux & macOS ⏳
+## Manual QA checklist (changes the system; run on a test machine)
+
+| OS | Steps |
+|----|-------|
+| Windows | `apply --elevate` → accept UAC → `status` shows optimized and "Reboot recommended". `startup on --elevate` → Task Scheduler shows "TibiaNetOptimizer". `revert --elevate` → defaults restored. `startup off --elevate`. |
+| Linux | `sudo tibia-net-optimizer apply` → `/etc/sysctl.d/99-tibia-net-optimizer.conf` exists, `ip route show default` shows `quickack 1`. Reconnect Wi-Fi → quickack is still on (NetworkManager hook). Reboot → still optimized. `sudo ... revert` → original values restored and files removed. `sudo ... startup on/off` → `systemctl is-enabled tibia-net-optimizer`. |
+| macOS | `sudo tibia-net-optimizer apply` → `sysctl net.inet.tcp.delayed_ack` = 0 and the plist exists in `/Library/LaunchDaemons`. Reboot → still 0. `revert` → `delayed_ack` back to 3 and plist removed. `startup on/off`. |
+
+## Sprint 3 — Cross-platform core: Linux & macOS ✅ (spike pending)
 
 Goal: the same CLI (and later the same GUI) runs on Linux and macOS and
 applies each OS's closest equivalents. Windows behaviour stays the same.
@@ -67,17 +75,30 @@ receive-buffer auto-tuning and delayed/quick ACK:
 | Start at login | Task Scheduler `/rl highest` | systemd system unit (root tweaks) + XDG autostart (tray) | LaunchDaemon (root tweaks) + LaunchAgent (tray) |
 | Config dir | `%APPDATA%` | `$XDG_CONFIG_HOME` or `~/.config` | `~/Library/Application Support` |
 
-| ID | Story | Acceptance criteria |
-|----|-------|---------------------|
-| S3-0 | **Spike:** measure whether the Linux/macOS tweaks actually help the Tibia client (native client and Wine/CrossOver). | A short write-up in `docs/` with before/after ping and jitter numbers. Drop any tweak that doesn't help. |
-| S3-1 | **Generic `Tweak` model.** Each tweak has an id, label, `check`/`apply`/`revert` and a platform. `SystemStatus` and `heal_plan` work on a list of tweaks instead of hard-coded Windows fields. | Windows is refactored onto the model with no behaviour change. All existing tests still pass. |
-| S3-2 | **`Sysctl` port** (read and write keys) with a fake. A `/proc/sys` + `sysctl -w` adapter on Linux and a `sysctl` adapter on macOS. | Parse/format logic is unit-tested. Read-only smoke test on each OS. |
-| S3-3 | **Linux tweaks:** `tcp_moderate_rcvbuf`, `tcp_autocorking`, `quickack` on the default route (parse `ip -j route` JSON). | Persists through a `sysctl.d` drop-in. Revert removes the drop-in and restores the values recorded before the change. |
-| S3-4 | **macOS tweaks:** `doautorcvbuf`, `delayed_ack`. | Persists through `/Library/LaunchDaemons/…plist`. Revert unloads and removes it. |
-| S3-5 | **Elevation and relaunch** on Unix (`geteuid`, `pkexec`, `osascript`). | Command construction is unit-tested. |
-| S3-6 | **Startup at login** on Unix (systemd unit / LaunchDaemon). | Generated unit/plist text is checked with snapshot tests. |
-| S3-7 | **Platform config paths** for Linux and macOS. | Unit-tested with injected env vars. |
-| S3-8 | **CI matrix:** `windows-latest`, `ubuntu-latest`, `macos-latest`. Smoke tests run read-only. | All three are green. |
+Done test-first (69 new tests run red against stubs, then green). The suite
+grew from 94 to 155 unit tests. All Unix logic is plain Rust that compiles
+everywhere, so it is unit-tested on Windows. `cargo clippy --all-targets -D
+warnings` is clean for `x86_64-pc-windows-msvc`, `x86_64-unknown-linux-gnu`
+and `aarch64-apple-darwin`.
+
+| ID | Story | Status |
+|----|-------|--------|
+| S3-0 | **Spike:** measure whether the Linux/macOS tweaks help Tibia. | ⏳ Method and hypotheses are in [spikes/S3-0-unix-tweaks.md](spikes/S3-0-unix-tweaks.md). Needs measurements on real Linux/macOS machines. |
+| S3-1 | **Generic `Tweak` model.** | ✅ `tweak/mod.rs`. `optimizer` and `report` work on `TweakStatus` lists, and Windows is refactored onto `tweak/windows.rs`. Text output is unchanged apart from layout. **JSON changed** to a generic `tweaks[]` array plus a `platform` field. |
+| S3-2 | **`Sysctl` port.** | ✅ `unix/sysctl.rs`. One `sysctl -n` / `sysctl -w` adapter serves both OSes, using the absolute path `/usr/sbin/sysctl` because `/usr/sbin` isn't on the PATH on Debian. The planned `/proc/sys` adapter was dropped because one adapter is enough. |
+| S3-3 | **Linux tweaks.** | ✅ `tcp_moderate_rcvbuf`, `tcp_autocorking` (`tweak/sysctl.rs`) and `quickack` (`tweak/quickack.rs`). Routes are parsed from the text output of `ip route show default` rather than `ip -j`, because `quickack` placement in the JSON varies by iproute2 version. Settings persist in a `sysctl.d` drop-in that records the original values. A NetworkManager dispatcher hook re-applies quickack after DHCP or reconnects, and is only installed when NetworkManager is present. |
+| S3-4 | **macOS tweaks.** | ✅ `doautorcvbuf`, `delayed_ack`, persisted by a LaunchDaemon plist that runs `sysctl -w` at boot and records the originals in XML comments. Revert removes it. No `launchctl` call is needed because the plist only runs at load. |
+| S3-5 | **Elevation and relaunch** on Unix. | ✅ `unix/elevate.rs`: `geteuid`. In a terminal it uses `sudo` and runs in the same terminal. Without one it uses `pkexec` on Linux or an AppleScript admin prompt on macOS. Shell and AppleScript quoting are unit-tested. |
+| S3-6 | **Start at boot** on Unix. | ✅ `unix/service.rs`: a systemd one-shot unit runs `apply` after `network-online.target`, or a LaunchDaemon on macOS. Both sit behind a new `StartupManager` port, which Task Scheduler also implements. Tray autostart (XDG / LaunchAgent) moves to Sprint 4. |
+| S3-7 | **Platform config paths.** | ✅ `config::config_dir_for` (XDG / Application Support / APPDATA), tested with injected env vars. |
+| S3-8 | **CI matrix** for Windows, Ubuntu and macOS with read-only smoke tests. | ✅ Workflow and `tests/unix_smoke.rs` are written. ⏳ Green on GitHub is only confirmed after a push. |
+
+Known limitations / follow-ups:
+- Under `sudo` on Linux, `$HOME` is root's, so settings go to root's config.
+  This only matters once the GUI stores settings; revisit in Sprint 5.
+- The quickack persistence relies on NetworkManager. On systemd-networkd or
+  ifupdown systems, quickack must be re-applied with `startup on`.
+- "Reboot recommended" is only computed on Windows (boot time on Unix is `None`).
 
 ## Sprint 4 — Tray + GUI shell ⏳
 

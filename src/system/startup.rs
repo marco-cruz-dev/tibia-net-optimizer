@@ -9,6 +9,30 @@ use crate::Result;
 pub const TASK_NAME: &str = "TibiaNetOptimizer";
 const SCHTASKS: &str = "schtasks";
 
+/// "Re-apply with admin rights at boot/logon", per OS.
+pub trait StartupManager {
+    fn is_registered(&self) -> Result<bool>;
+    fn register(&self, exe: &Path) -> Result<()>;
+    fn unregister(&self) -> Result<()>;
+}
+
+/// Windows: Task Scheduler logon task with highest privileges.
+pub struct TaskScheduler<R> {
+    pub runner: R,
+}
+
+impl<R: CommandRunner> StartupManager for TaskScheduler<R> {
+    fn is_registered(&self) -> Result<bool> {
+        is_registered(&self.runner)
+    }
+    fn register(&self, exe: &Path) -> Result<()> {
+        register(&self.runner, exe)
+    }
+    fn unregister(&self) -> Result<()> {
+        unregister(&self.runner)
+    }
+}
+
 /// The `/tr` value: quoted exe path followed by `--minimized`.
 pub fn task_command(exe: &Path) -> String {
     format!("\"{}\" --minimized", exe.display())

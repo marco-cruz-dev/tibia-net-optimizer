@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::platform::Os;
 use crate::Result;
 
 pub const DEFAULT_PING_TARGET: &str = "secura.tibia.com";
@@ -39,9 +40,9 @@ impl Default for Config {
 }
 
 impl Config {
-    /// `%APPDATA%\TibiaNetOptimizer\config.json`, if `APPDATA` is set.
+    /// `config.json` inside [`config_dir_for`] for the running OS.
     pub fn default_path() -> Option<PathBuf> {
-        std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("TibiaNetOptimizer").join("config.json"))
+        config_dir_for(Os::current(), |k| std::env::var(k).ok()).map(|d| d.join("config.json"))
     }
 
     /// Loads settings; a missing or corrupt file yields defaults so the app
@@ -64,9 +65,82 @@ impl Config {
     }
 }
 
+/// Per-OS settings directory:
+/// - Windows: `%APPDATA%\TibiaNetOptimizer`
+/// - Linux: `$XDG_CONFIG_HOME/tibia-net-optimizer` (absolute only), else `~/.config/tibia-net-optimizer`
+/// - macOS: `~/Library/Application Support/TibiaNetOptimizer`
+pub fn config_dir_for(os: Os, env: impl Fn(&str) -> Option<String>) -> Option<PathBuf> {
+    let non_empty = |k: &str| env(k).filter(|v| !v.is_empty());
+    match os {
+        Os::Windows => non_empty("APPDATA").map(|d| PathBuf::from(d).join("TibiaNetOptimizer")),
+        Os::Linux => non_empty("XDG_CONFIG_HOME")
+            .filter(|d| d.starts_with('/'))
+            .map(PathBuf::from)
+            .or_else(|| non_empty("HOME").map(|h| PathBuf::from(h).join(".config")))
+            .map(|d| d.join("tibia-net-optimizer")),
+        Os::Macos => non_empty("HOME").map(|h| {
+            PathBuf::from(h)
+                .join("Library")
+                .join("Application Support")
+                .join("TibiaNetOptimizer")
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn env<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<String> + 'a {
+        move |k| {
+            pairs
+                .iter()
+                .find(|(key, _)| *key == k)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn windows_config_dir_uses_appdata() {
+        assert_eq!(
+            config_dir_for(Os::Windows, env(&[("APPDATA", r"C:\Users\me\AppData\Roaming")])),
+            Some(PathBuf::from(r"C:\Users\me\AppData\Roaming\TibiaNetOptimizer"))
+        );
+        assert_eq!(config_dir_for(Os::Windows, env(&[])), None);
+    }
+
+    #[test]
+    fn linux_config_dir_prefers_absolute_xdg() {
+        assert_eq!(
+            config_dir_for(
+                Os::Linux,
+                env(&[("XDG_CONFIG_HOME", "/xdg"), ("HOME", "/home/me")])
+            ),
+            Some(PathBuf::from("/xdg/tibia-net-optimizer"))
+        );
+        assert_eq!(
+            config_dir_for(
+                Os::Linux,
+                env(&[("XDG_CONFIG_HOME", "relative"), ("HOME", "/home/me")])
+            ),
+            Some(PathBuf::from("/home/me/.config/tibia-net-optimizer"))
+        );
+        assert_eq!(
+            config_dir_for(Os::Linux, env(&[("XDG_CONFIG_HOME", ""), ("HOME", "/home/me")])),
+            Some(PathBuf::from("/home/me/.config/tibia-net-optimizer"))
+        );
+        assert_eq!(config_dir_for(Os::Linux, env(&[])), None);
+    }
+
+    #[test]
+    fn macos_config_dir_uses_application_support() {
+        assert_eq!(
+            config_dir_for(Os::Macos, env(&[("HOME", "/Users/me")])),
+            Some(PathBuf::from(
+                "/Users/me/Library/Application Support/TibiaNetOptimizer"
+            ))
+        );
+    }
 
     #[test]
     fn defaults_are_safe() {

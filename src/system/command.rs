@@ -40,6 +40,12 @@ pub trait CommandRunner {
     fn run(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput>;
 }
 
+impl<T: CommandRunner + ?Sized> CommandRunner for &T {
+    fn run(&self, program: &str, args: &[&str]) -> io::Result<CommandOutput> {
+        (**self).run(program, args)
+    }
+}
+
 /// Real implementation backed by `std::process::Command`.
 /// On Windows it uses `CREATE_NO_WINDOW` so no console window flashes.
 #[derive(Debug, Default, Clone, Copy)]

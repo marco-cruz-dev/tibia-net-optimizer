@@ -1,86 +1,60 @@
-//! Combines individual checks into an overall status and decides what the
+//! Combines tweak statuses into an overall status and decides what the
 //! auto-heal loop should fix.
 
 use crate::config::Config;
-use crate::network::autotuning::AutoTuningLevel;
-use crate::network::nagle::NagleStatus;
-
-/// Snapshot of everything we check.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SystemStatus {
-    /// `None` when the level could not be read.
-    pub autotuning: Option<AutoTuningLevel>,
-    pub nagle: NagleStatus,
-}
+use crate::tweak::{TweakId, TweakState, TweakStatus};
 
 /// Drives the tray icon colour and the status banner.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Overall {
-    /// Green: both optimizations active.
+    /// Green: every tweak is optimized.
     Optimized,
-    /// Red: at least one setting is known to be suboptimal.
+    /// Red: at least one tweak is known to be suboptimal.
     NeedsFix,
-    /// Yellow: couldn't determine (read error / no active adapter).
+    /// Yellow: nothing is known-bad, but something couldn't be determined.
     Unknown,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Fix {
-    DisableAutoTuning,
-    DisableNagle,
-}
-
-impl SystemStatus {
-    pub fn needs_autotuning_fix(&self) -> bool {
-        matches!(&self.autotuning, Some(level) if !level.is_optimized())
-    }
-
-    pub fn needs_nagle_fix(&self) -> bool {
-        self.nagle == NagleStatus::NotOptimized
-    }
-
-    pub fn overall(&self) -> Overall {
-        if self.needs_autotuning_fix() || self.needs_nagle_fix() {
-            Overall::NeedsFix
-        } else if self
-            .autotuning
-            .as_ref()
-            .is_some_and(AutoTuningLevel::is_optimized)
-            && self.nagle == NagleStatus::Optimized
-        {
-            Overall::Optimized
-        } else {
-            Overall::Unknown
+impl Overall {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Overall::Optimized => "optimized",
+            Overall::NeedsFix => "needs_fix",
+            Overall::Unknown => "unknown",
         }
     }
 }
 
-/// Fixes the background auto-heal loop should apply right now.
+pub fn overall(statuses: &[TweakStatus]) -> Overall {
+    if statuses.iter().any(|s| s.state == TweakState::NotOptimized) {
+        Overall::NeedsFix
+    } else if !statuses.is_empty() && statuses.iter().all(|s| s.state == TweakState::Optimized) {
+        Overall::Optimized
+    } else {
+        Overall::Unknown
+    }
+}
+
+/// Tweaks the background auto-heal loop should apply right now.
 /// Nothing happens unless auto-heal is enabled *and* we're elevated.
-pub fn heal_plan(status: &SystemStatus, config: &Config, elevated: bool) -> Vec<Fix> {
+pub fn heal_plan(statuses: &[TweakStatus], config: &Config, elevated: bool) -> Vec<TweakId> {
     if !config.auto_heal || !elevated {
         return Vec::new();
     }
-    let mut fixes = Vec::new();
-    if status.needs_autotuning_fix() {
-        fixes.push(Fix::DisableAutoTuning);
-    }
-    if status.needs_nagle_fix() {
-        fixes.push(Fix::DisableNagle);
-    }
-    fixes
+    statuses
+        .iter()
+        .filter(|s| s.state == TweakState::NotOptimized)
+        .map(|s| s.id)
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use AutoTuningLevel::*;
+    use TweakState::*;
 
-    fn status(at: Option<AutoTuningLevel>, nagle: NagleStatus) -> SystemStatus {
-        SystemStatus {
-            autotuning: at,
-            nagle,
-        }
+    fn st(id: TweakId, state: TweakState) -> TweakStatus {
+        TweakStatus::new(id, "x", state, "")
     }
 
     fn heal_on() -> Config {
@@ -91,57 +65,50 @@ mod tests {
     }
 
     #[test]
-    fn overall_optimized_when_both_are() {
-        assert_eq!(
-            status(Some(Disabled), NagleStatus::Optimized).overall(),
-            Overall::Optimized
-        );
+    fn overall_optimized_when_all_are() {
+        let s = [
+            st(TweakId::WinAutoTuning, Optimized),
+            st(TweakId::WinNagle, Optimized),
+        ];
+        assert_eq!(overall(&s), Overall::Optimized);
     }
 
     #[test]
-    fn overall_needs_fix_when_any_is_suboptimal() {
-        assert_eq!(
-            status(Some(Normal), NagleStatus::Optimized).overall(),
-            Overall::NeedsFix
-        );
-        assert_eq!(
-            status(Some(Disabled), NagleStatus::NotOptimized).overall(),
-            Overall::NeedsFix
-        );
-        // A known problem beats an unknown.
-        assert_eq!(
-            status(None, NagleStatus::NotOptimized).overall(),
-            Overall::NeedsFix
-        );
+    fn overall_needs_fix_when_any_is_suboptimal_even_with_unknowns() {
+        let s = [
+            st(TweakId::WinAutoTuning, Unknown),
+            st(TweakId::WinNagle, NotOptimized),
+        ];
+        assert_eq!(overall(&s), Overall::NeedsFix);
     }
 
     #[test]
-    fn overall_unknown_when_information_missing() {
-        assert_eq!(status(None, NagleStatus::Optimized).overall(), Overall::Unknown);
-        assert_eq!(
-            status(Some(Disabled), NagleStatus::NoActiveAdapter).overall(),
-            Overall::Unknown
-        );
+    fn overall_unknown_when_information_missing_or_empty() {
+        let s = [
+            st(TweakId::WinAutoTuning, Optimized),
+            st(TweakId::WinNagle, Unknown),
+        ];
+        assert_eq!(overall(&s), Overall::Unknown);
+        assert_eq!(overall(&[]), Overall::Unknown);
     }
 
     #[test]
-    fn heal_plan_fixes_each_drifted_setting() {
-        let s = status(Some(Normal), NagleStatus::NotOptimized);
+    fn heal_plan_targets_each_suboptimal_tweak() {
+        let s = [
+            st(TweakId::LinuxModerateRcvbuf, NotOptimized),
+            st(TweakId::LinuxAutocorking, Optimized),
+            st(TweakId::LinuxQuickAck, NotOptimized),
+            st(TweakId::WinNagle, Unknown),
+        ];
         assert_eq!(
             heal_plan(&s, &heal_on(), true),
-            vec![Fix::DisableAutoTuning, Fix::DisableNagle]
+            vec![TweakId::LinuxModerateRcvbuf, TweakId::LinuxQuickAck]
         );
-    }
-
-    #[test]
-    fn heal_plan_empty_when_already_optimized_or_unknown() {
-        assert!(heal_plan(&status(Some(Disabled), NagleStatus::Optimized), &heal_on(), true).is_empty());
-        assert!(heal_plan(&status(None, NagleStatus::NoActiveAdapter), &heal_on(), true).is_empty());
     }
 
     #[test]
     fn heal_plan_respects_config_and_elevation() {
-        let s = status(Some(Normal), NagleStatus::NotOptimized);
+        let s = [st(TweakId::WinNagle, NotOptimized)];
         assert!(
             heal_plan(&s, &Config::default(), true).is_empty(),
             "auto-heal off"

@@ -41,6 +41,12 @@ pub trait AdapterSource {
     fn adapters(&self) -> Result<Vec<OsAdapter>>;
 }
 
+impl<T: AdapterSource + ?Sized> AdapterSource for &T {
+    fn adapters(&self) -> Result<Vec<OsAdapter>> {
+        (**self).adapters()
+    }
+}
+
 /// Decides which registry interfaces are active.
 ///
 /// - `os = Some(..)`: an interface is active only if the OS reports a matching

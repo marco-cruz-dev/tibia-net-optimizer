@@ -48,6 +48,18 @@ pub trait InterfaceRegistry {
     fn delete_value(&self, guid: &str, name: &str) -> Result<()>;
 }
 
+impl<T: InterfaceRegistry + ?Sized> InterfaceRegistry for &T {
+    fn interfaces(&self) -> Result<Vec<InterfaceSnapshot>> {
+        (**self).interfaces()
+    }
+    fn set_dword(&self, guid: &str, name: &str, value: u32) -> Result<()> {
+        (**self).set_dword(guid, name, value)
+    }
+    fn delete_value(&self, guid: &str, name: &str) -> Result<()> {
+        (**self).delete_value(guid, name)
+    }
+}
+
 /// A connected interface with a usable IPv4 address (what the UI shows).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ActiveAdapter {
@@ -110,23 +122,24 @@ pub fn revert(reg: &impl InterfaceRegistry) -> Result<Vec<String>> {
     Ok(reverted)
 }
 
+/// Test doubles shared with other modules' tests.
 #[cfg(test)]
-mod tests {
+pub(crate) mod fake {
     use super::*;
     use crate::network::adapters::OsAdapter;
     use std::cell::RefCell;
 
     /// In-memory registry fake.
-    struct FakeRegistry(RefCell<Vec<InterfaceSnapshot>>);
+    pub struct FakeRegistry(RefCell<Vec<InterfaceSnapshot>>);
 
     impl FakeRegistry {
-        fn new(ifaces: Vec<InterfaceSnapshot>) -> Self {
+        pub fn new(ifaces: Vec<InterfaceSnapshot>) -> Self {
             Self(RefCell::new(ifaces))
         }
-        fn get(&self, guid: &str) -> InterfaceSnapshot {
+        pub fn get(&self, guid: &str) -> InterfaceSnapshot {
             self.0.borrow().iter().find(|i| i.guid == guid).unwrap().clone()
         }
-        fn with<F: FnOnce(&mut InterfaceSnapshot)>(&self, guid: &str, f: F) {
+        pub fn with<F: FnOnce(&mut InterfaceSnapshot)>(&self, guid: &str, f: F) {
             f(self.0.borrow_mut().iter_mut().find(|i| i.guid == guid).unwrap())
         }
     }
@@ -154,21 +167,21 @@ mod tests {
     }
 
     /// OS adapter info unavailable → registry-only fallback.
-    struct NoOsInfo;
+    pub struct NoOsInfo;
     impl AdapterSource for NoOsInfo {
         fn adapters(&self) -> Result<Vec<OsAdapter>> {
             Err(crate::Error::Parse("no OS info in this test".into()))
         }
     }
 
-    struct LiveOs(Vec<OsAdapter>);
+    pub struct LiveOs(pub Vec<OsAdapter>);
     impl AdapterSource for LiveOs {
         fn adapters(&self) -> Result<Vec<OsAdapter>> {
             Ok(self.0.clone())
         }
     }
 
-    fn dhcp(guid: &str, ip: &str) -> InterfaceSnapshot {
+    pub fn dhcp(guid: &str, ip: &str) -> InterfaceSnapshot {
         InterfaceSnapshot {
             guid: guid.into(),
             dhcp_ip_address: Some(ip.into()),
@@ -176,11 +189,18 @@ mod tests {
         }
     }
 
-    fn optimized(mut i: InterfaceSnapshot) -> InterfaceSnapshot {
+    pub fn optimized(mut i: InterfaceSnapshot) -> InterfaceSnapshot {
         i.tcp_ack_frequency = Some(1);
         i.tcp_no_delay = Some(1);
         i
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::fake::*;
+    use super::*;
+    use crate::network::adapters::OsAdapter;
 
     // --- InterfaceSnapshot -------------------------------------------------
 

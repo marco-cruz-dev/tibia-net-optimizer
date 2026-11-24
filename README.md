@@ -1,39 +1,44 @@
 # Tibia Network Optimizer
 
-A lightweight utility written in Rust. It tunes TCP settings so that **Tibia**
-stops dropping inputs, losing spell casts and rubber-banding on distant
-servers (for example Secura in Frankfurt played from Portugal), even when ping
-looks fine. It targets Windows first; Linux and macOS support is planned.
+A lightweight cross-platform utility written in Rust. It tunes TCP settings so
+that **Tibia** stops dropping inputs, losing spell casts and rubber-banding on
+distant servers (for example Secura in Frankfurt played from Portugal), even
+when ping looks fine. It runs on **Windows**, **Linux** and **macOS**.
 
-> **Status: Sprint 2 of 7 done.** You can use the tested core through a CLI.
-> Next is cross-platform support (Linux and macOS), followed by the system
-> tray and GUI. See [docs/BACKLOG.md](docs/BACKLOG.md).
+> **Status: Sprint 3 of 7 done.** You can use the tested core through a CLI on
+> all three OSes. Next is the system tray and GUI. See
+> [docs/BACKLOG.md](docs/BACKLOG.md).
 
 ## Why
 
-Three Windows defaults hurt old game engines that send many small packets:
+Old game engines send many small packets. OS defaults that buffer, cork or
+delay them add latency and jitter:
 
-| Problem | Effect | Fix applied |
-|---------|--------|-------------|
-| **TCP Receive Window Auto-Tuning** | Buffers are resized on the fly, which causes jitter | `netsh int tcp set global autotuninglevel=disabled` |
-| **Nagle's algorithm / delayed ACK** | Small packets such as steps and hotkeys are held back and bundled, for up to about 200 ms | `TcpAckFrequency=1` and `TCPNoDelay=1` (DWORD) on each connected interface under `HKLM\SYSTEM\CurrentControlSet\Services\Tcpip\Parameters\Interfaces\{GUID}` |
-| **Windows Updates** | Updates silently reset these settings | Auto-heal (planned, Sprint 5) |
+| Problem | Windows fix | Linux fix | macOS fix |
+|---------|-------------|-----------|-----------|
+| **Receive-window auto-tuning** (buffers resized on the fly cause jitter) | `netsh int tcp set global autotuninglevel=disabled` | `net.ipv4.tcp_moderate_rcvbuf=0` | `net.inet.tcp.doautorcvbuf=0` |
+| **Delayed ACK** (ACKs held for up to 40–200 ms) | `TcpAckFrequency=1` per connected interface (registry) | `quickack 1` on default routes | `net.inet.tcp.delayed_ack=0` |
+| **Small-packet coalescing** (steps and hotkeys bundled) | `TCPNoDelay=1` per connected interface (registry) | `net.ipv4.tcp_autocorking=0` | — (per socket only) |
+| **Persistence** (updates/reboots reset settings) | Registry/netsh persist; auto-heal planned | `/etc/sysctl.d/99-tibia-net-optimizer.conf` + NetworkManager hook | LaunchDaemon that re-applies at boot |
 
-Every change can be reverted to the Windows defaults (`autotuninglevel=normal`,
-with the registry values deleted).
+Every change can be reverted. On Linux and macOS the original values are
+recorded and restored.
+
+> The Linux/macOS benefit for Tibia is still to be measured
+> ([spike S3-0](docs/spikes/S3-0-unix-tweaks.md)). Tweaks that don't help will
+> be dropped.
 
 ## Features
 
-- [x] Detect and apply/revert TCP auto-tuning. Works on localized Windows (OEM code-page aware).
-- [x] Detect **connected** IPv4 adapters (registry cross-checked with the OS, so stale DHCP leases are ignored) and show their friendly names.
-- [x] Apply/revert the Nagle / delayed-ACK tweaks.
-- [x] Overall status: Optimized, Needs fix or Unknown. Output as text or `--json`.
-- [x] Administrator detection and `--elevate` (UAC relaunch).
-- [x] Elevated, prompt-free start at logon via Task Scheduler (`startup on/off`).
-- [x] "Reboot recommended" until the machine restarts after an auto-tuning change.
-- [x] Settings persisted in `%APPDATA%\TibiaNetOptimizer\config.json`.
+- [x] Windows: TCP auto-tuning and Nagle / delayed-ACK tweaks. Only **connected** adapters are patched (stale DHCP leases are ignored), and friendly names are shown.
+- [x] Linux: receive-buffer auto-tuning, autocorking, per-route quick ACK.
+- [x] macOS: receive-buffer auto-tuning, delayed ACK.
+- [x] Overall status (Optimized, Needs fix or Unknown) as text or `--json`.
+- [x] Admin/root detection and `--elevate` (UAC / `sudo` / `pkexec` / macOS admin prompt).
+- [x] Re-apply at startup: Task Scheduler, systemd or launchd (`startup on/off`).
+- [x] "Reboot recommended" after a Windows auto-tuning change.
+- [x] Settings in the OS-appropriate config directory.
 - [x] Latency, jitter and packet-loss statistics engine.
-- [ ] Linux and macOS support (Sprint 3).
 - [ ] System tray icon (green/red) and egui dashboard (Sprint 4).
 - [ ] Background auto-heal with notifications (Sprint 5).
 - [ ] Live ping and jitter monitor for Secura/Frankfurt (Sprint 6).
@@ -45,57 +50,70 @@ tibia-net-optimizer [COMMAND] [OPTIONS]
 
 Commands:
   status [--json]          Show current optimization state (default, read-only)
-  apply                    Disable auto-tuning and Nagle on active adapters (admin)
-  revert                   Restore Windows defaults (admin)
-  startup [on|off|status]  Run elevated at logon via Task Scheduler (admin for on/off)
+  apply                    Apply all optimizations for this OS (admin/root)
+  revert                   Restore the OS defaults (admin/root)
+  startup [on|off|status]  Re-apply automatically at boot/logon (admin/root for on/off)
+                           Windows: Task Scheduler, Linux: systemd, macOS: launchd
 
 Options:
-  --elevate                Relaunch as Administrator (UAC prompt) if needed
+  --elevate                Relaunch with admin rights (UAC / sudo / pkexec) if needed
   --pause                  Wait for Enter before exiting
   -h, --help               Show this help
 ```
 
 ```powershell
+# Windows
 cargo build --release
 .\target\release\tibia-net-optimizer.exe                  # status, no admin needed
 .\target\release\tibia-net-optimizer.exe apply --elevate  # UAC prompt, then applies
-.\target\release\tibia-net-optimizer.exe status --json    # machine-readable
 ```
 
-Example output:
+```sh
+# Linux / macOS
+cargo build --release
+./target/release/tibia-net-optimizer                      # status, no root needed
+sudo ./target/release/tibia-net-optimizer apply
+```
+
+Example output (Windows):
 
 ```text
-TCP auto-tuning : disabled (optimized)
-Nagle / ACK     : disabled on all active adapters (optimized)
-  - Ethernet             192.168.1.185   [tuned]    {cdcfde38-...}
-Startup task    : not registered
-Privileges      : standard user (read-only)
+TCP auto-tuning           : disabled (optimized)
+Nagle / delayed ACK       : disabled on all active adapters (optimized)
+  - Ethernet             [tuned]    192.168.1.185  {cdcfde38-...}
+Run at startup            : no
+Privileges                : standard user (read-only)
 
-Overall         : OPTIMIZED for Tibia
+Overall                   : OPTIMIZED for Tibia
 ```
 
-Reboot after changing auto-tuning so it takes full effect. `status` reminds
-you until you do.
+`status --json` returns `{ platform, overall, elevated, tweaks: [{ id, label,
+state, summary, details[] }], startup, reboot_recommended }`.
 
 ## Development
 
 ### Prerequisites
 
-- Windows 10/11
-- Rust stable, 1.82 or newer (MSVC toolchain): `winget install Rustlang.Rustup`
-- Visual Studio Build Tools with the "Desktop development with C++" workload
+- Rust stable, 1.82 or newer
+- **Windows:** MSVC toolchain (`winget install Rustlang.Rustup`) and Visual Studio Build Tools ("Desktop development with C++")
+- **Linux/macOS:** a standard `rustup` install. Runtime tools used: `sysctl`, `ip` (iproute2), `systemctl`
 
 ### Commands
 
-```powershell
+```sh
 cargo test                                   # fast unit tests (fakes, no OS changes)
 cargo test -- --ignored --nocapture          # read-only smoke tests against this machine
 cargo clippy --all-targets -- -D warnings    # lint
 cargo fmt --all                              # format
 cargo run -- status                          # try it
+
+# Lint other OSes without leaving yours (needs `rustup target add ...`):
+cargo clippy --all-targets --target x86_64-unknown-linux-gnu -- -D warnings
+cargo clippy --all-targets --target aarch64-apple-darwin -- -D warnings
 ```
 
-CI runs all of these on `windows-latest` ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
+CI runs fmt, clippy, the unit tests and the smoke tests on **Windows, Ubuntu
+and macOS** ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
 
 ### TDD workflow
 
@@ -104,23 +122,26 @@ This project uses short, agile sprints and test-driven development:
 1. Pick the next story in [docs/BACKLOG.md](docs/BACKLOG.md).
 2. **Red:** write the tests against a stub (`todo!()`) and watch them fail.
 3. **Green:** write the smallest change that makes them pass.
-4. **Refactor:** clean up while keeping the tests green, then run clippy and fmt.
+4. **Refactor:** clean up while keeping the tests green, then run clippy (for all three targets) and fmt.
 5. Update the backlog and README, then commit.
 
-To keep tests fast and safe, the code follows a **ports and adapters** design:
+### Architecture
+
+A **ports and adapters** design keeps the tests fast, safe and OS-independent:
 
 ```text
-              ┌──────────────────── pure, unit-tested ─────────────────────┐
- main.rs ───► │ cli (args)    report (text/JSON)   optimizer (status, heal)│
- (CLI/GUI)    │ autotuning::parse_level   adapters::detect_active   nagle  │
-              │ config   ipv4   ping stats   elevation quoting   boot      │
-              └──────┬──────────────────────┬───────────────────┬──────────┘
-                     │ CommandRunner        │ InterfaceRegistry │ AdapterSource   ◄── ports (traits)
-             ┌───────▼────────┐  ┌──────────▼─────────┐  ┌──────▼──────────────┐
- tests use   │ SystemCommand  │  │ WindowsInterface   │  │ WindowsAdapter      │ ◄── thin adapters,
- fakes ────► │ Runner (netsh, │  │ Registry (HKLM)    │  │ Source (IP Helper)  │     smoke-tested
-             │ schtasks)      │  └────────────────────┘  └─────────────────────┘
-             └────────────────┘
+ main.rs (CLI, later GUI)
+    │  platform::current()  ──►  Platform { os, tweaks: Vec<Box<dyn Tweak>>, startup }
+    ▼
+ ┌──────────────────────────── pure, unit-tested on every OS ───────────────────────────┐
+ │ Tweak model · optimizer (overall, heal plan) · report (text/JSON) · cli · config     │
+ │ Windows: AutoTuningTweak, NagleTweak   Linux/macOS: SysctlTweak, QuickAckTweak       │
+ │ parsers/renderers: netsh, ip route, sysctl.d, launchd plist, systemd unit, quoting   │
+ └───────┬──────────────┬──────────────┬──────────────┬───────────────┬─────────────────┘
+         │ CommandRunner│ Interface    │ AdapterSource│ Sysctl /      │ StartupManager   ◄── ports
+         │              │ Registry     │              │ SettingsStore │
+   netsh, schtasks,  winreg (HKLM)  IP Helper     sysctl, files   schtasks / systemd /  ◄── thin adapters,
+   sysctl, ip, systemctl                                           launchd                 smoke-tested
 ```
 
 Tests **never modify** system settings. The smoke tests only read.
@@ -129,29 +150,27 @@ Tests **never modify** system settings. The smoke tests only read.
 
 ```text
 src/
-├── main.rs              CLI shell over the library (GUI becomes the default in Sprint 4)
-├── lib.rs
+├── main.rs              Platform-agnostic CLI shell
 ├── cli.rs               Argument parsing and relaunch args
 ├── report.rs            Status report: text and JSON
-├── error.rs             Error type (AccessDenied, CommandFailed, Parse, Io)
-├── config.rs            JSON settings in %APPDATA%
-├── optimizer.rs         Overall status and auto-heal decisions
-├── network/
-│   ├── autotuning.rs    netsh parse/apply/revert
-│   ├── adapters.rs      AdapterSource port; join of registry and live OS adapters
-│   ├── iphelper.rs      GetAdaptersAddresses adapter (Windows)
-│   ├── nagle.rs         TcpAckFrequency/TCPNoDelay detection, apply, revert
-│   ├── registry.rs      winreg adapter (Windows)
-│   ├── ipv4.rs          Usable-IPv4 validation
-│   └── ping.rs          Rolling latency/jitter/loss stats
-└── system/
-    ├── command.rs       CommandRunner port, CREATE_NO_WINDOW runner, test fake
-    ├── encoding.rs      OEM code-page decoding of console output
-    ├── elevation.rs     is_elevated, UAC relaunch, Windows argument quoting
-    ├── boot.rs          Boot time and reboot-pending logic
-    └── startup.rs       schtasks /rl highest logon task
-tests/system_smoke.rs    #[ignore]d read-only tests against the real OS
-docs/BACKLOG.md          Sprint plan and Definition of Done
+├── optimizer.rs         Overall status and auto-heal plan over tweak statuses
+├── config.rs            JSON settings in the per-OS config directory
+├── error.rs
+├── tweak/               Tweak trait and implementations
+│   ├── windows.rs       AutoTuningTweak, NagleTweak
+│   ├── sysctl.rs        SysctlTweak (Linux/macOS), records originals
+│   └── quickack.rs      Linux per-route quick ACK
+├── platform/            Per-OS assembly: windows.rs, linux.rs, macos.rs
+├── network/             Windows networking: netsh, registry, IP Helper, adapters; ping stats
+├── unix/                sysctl port, persistence (sysctl.d / plist), ip route,
+│                        systemd/launchd, sudo/pkexec/osascript
+└── system/              Command runner, elevation, encoding, boot time, Task Scheduler
+tests/
+├── system_smoke.rs      Windows read-only smoke tests
+└── unix_smoke.rs        Linux/macOS read-only smoke tests
+docs/
+├── BACKLOG.md           Sprint plan, Definition of Done, manual QA checklist
+└── spikes/              Investigations (S3-0: Unix tweak effectiveness)
 project_info.md          Original product specification
 ```
 
