@@ -1,0 +1,27 @@
+[package]
+name = "tibia-net-optimizer"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80"
+license = "GPL-3.0-only"
+description = "Windows tray utility that tunes TCP settings (auto-tuning, Nagle) for low-latency Tibia play"
+readme = "README.md"
+
+# Sprint 1 keeps dependencies minimal: only what the domain core + Windows
+# adapters need. GUI/tray crates (eframe, egui, tray-icon, image) and the
+# `windows` crate are added in the sprints that introduce those features.
+[dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+[target.'cfg(windows)'.dependencies]
+winreg = "0.52"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
